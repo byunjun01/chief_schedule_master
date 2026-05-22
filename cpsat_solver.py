@@ -247,11 +247,14 @@ def build_problem_data(df_all, residents, leaves, week_count, start_date, holida
 
         # 휴가
         leave_dates = set()
+        denom_leave_dates = set()  # 분모(avail) 차감 대상. '직전휴가'는 제외(분모에서 빼지 않음)
         for l in leaves:
             if l['이름'] == name:
                 blocked.add((name, l['날짜'], '오전'))
                 blocked.add((name, l['날짜'], '오후'))
                 leave_dates.add(l['날짜'])
+                if l.get('종류') != '직전휴가':
+                    denom_leave_dates.add(l['날짜'])
 
         # 메인외래 (R3) - 일하는 슬롯. 다른 task 못 받지만 분자/분모에 포함
         main_slots = []
@@ -299,8 +302,9 @@ def build_problem_data(df_all, residents, leaves, week_count, start_date, holida
 
         # 사용 가능한 세션 수 (분모)
         # 휴가/공휴일만 차감. 메인외래/학생실습/영상은 "일하는 슬롯"이므로 분모에 포함됨.
+        # 단, '직전휴가'는 분모에서 차감하지 않음 (denom_leave_dates에 미포함).
         leave_count = 0
-        for ld in leave_dates:
+        for ld in denom_leave_dates:
             if ld not in holidays:
                 leave_count += 2
         avail = max(1, total - leave_count)

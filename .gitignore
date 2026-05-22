@@ -2,3 +2,5 @@ venv/
 __pycache__/
 .streamlit/
 *.pyc
+.claude/
+.omc/

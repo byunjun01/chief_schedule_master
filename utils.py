@@ -10,9 +10,10 @@ def get_task_style(task_name):
     if any(kw in task_name for kw in ["연보", "연건 보건소"]): return "#FF85FF", "black"
     if "예진" in task_name: return "#CCCCFF", "black"
     if "처치" in task_name: return "#DDEBF7", "black"
+    # 통증클리닉 참관은 외래참관과 동일 색(#FBE5D7). "클리닉 참관"보다 먼저 매칭되어야 함
+    if any(kw in task_name for kw in ["외래 참관", "통증클리닉 참관"]): return "#FBE5D7", "black"
     if any(kw in task_name for kw in ["판정 참관", "건증 참관", "클리닉 참관"]): return "#F2CEF0", "black"
     if "건증 판정" in task_name or (any(p in task_name for p in ["조비룡", "박민선"]) and "클리닉 판정" in task_name): return "#E2F0D9", "black"
-    if any(kw in task_name for kw in ["외래 참관", "통증클리닉 참관"]): return "#FBE5D7", "black"
     if any(kw in task_name for kw in ["외래 차리", "통증클리닉 차리", "차리"]): return "#FFF2CC", "black"
     return "white", "black"
 

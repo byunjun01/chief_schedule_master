@@ -157,9 +157,22 @@ with st.sidebar:
                 if (p_select, date_only) not in st.session_state.off_slots: st.session_state.off_slots.append((p_select, date_only))
             st.session_state.current_df_all = generate_schedule(st.session_state.base_date, st.session_state.week_count, user_holidays, st.session_state.master_schedules, st.session_state.off_slots, supplementary_schedules=st.session_state.supplementary_schedules); st.rerun()
     if st.session_state.off_slots:
-        for i, (p, d) in enumerate(st.session_state.off_slots):
-            c1, c2 = st.columns([4, 1]); c1.write(f"· {p} ({d})")
-            if c2.button("X", key=f"prof_off_{i}"): st.session_state.off_slots.pop(i); st.session_state.current_df_all = generate_schedule(st.session_state.base_date, st.session_state.week_count, user_holidays, st.session_state.master_schedules, st.session_state.off_slots, supplementary_schedules=st.session_state.supplementary_schedules); st.rerun()
+        with st.expander(f"📋 등록된 휴진 ({len(st.session_state.off_slots)}건)", expanded=True):
+            # 교수별 → 날짜순 정렬하여 가독성 향상 (원래 인덱스는 삭제용으로 보존)
+            indexed = sorted(
+                enumerate(st.session_state.off_slots),
+                key=lambda x: (PROF_ORDER.index(x[1][0]) if x[1][0] in PROF_ORDER else 999, x[1][1])
+            )
+            n_cols = 2
+            grid_cols = st.columns(n_cols)
+            for pos, (i, (p, d)) in enumerate(indexed):
+                with grid_cols[pos % n_cols]:
+                    cc1, cc2 = st.columns([4, 1])
+                    cc1.write(f"· {p} ({d})")
+                    if cc2.button("X", key=f"prof_off_{i}"):
+                        st.session_state.off_slots.pop(i)
+                        st.session_state.current_df_all = generate_schedule(st.session_state.base_date, st.session_state.week_count, user_holidays, st.session_state.master_schedules, st.session_state.off_slots, supplementary_schedules=st.session_state.supplementary_schedules)
+                        st.rerun()
     st.markdown("---")
     st.header("➕ 보충진료 추가")
     st.caption("단발성 진료를 추가하면 차리/판정/참관이 자동 생성됩니다. (위치: 진료일 -2영업일)")
@@ -239,6 +252,7 @@ with st.sidebar:
         "task_time_overrides": st.session_state.get("cpsat_task_time_overrides", {}),
         "task_date_overrides": st.session_state.get("cpsat_task_date_overrides", {}),
         "shifted_tasks": st.session_state.get("cpsat_shifted_tasks", []),
+        "original_df_dates": st.session_state.get("cpsat_original_df_dates", {}),
     }
     st.download_button("📥 설정 저장", json.dumps(export_data, ensure_ascii=False, indent=2), f"backup_{datetime.today().strftime('%Y%m%d')}.json", "application/json", use_container_width=True)
     uploaded_file = st.file_uploader("📤 불러오기", type=["json"])
@@ -329,9 +343,27 @@ with tabs[5]:
         if cols[3].form_submit_button("등록") and res_names:
             for d_str in l_dates: st.session_state.resident_leaves.append({"이름": l_name, "날짜": d_str.split(" ")[0], "종류": l_type})
             st.rerun()
-    for i, r_leave in enumerate(st.session_state.resident_leaves):
-        c1, c2, c3, c4 = st.columns([2, 2, 2, 1]); c1.write(f"**{r_leave['날짜']}**"); c2.write(f"👤 {r_leave['이름']}"); c3.write(f"[{r_leave['종류']}]")
-        if c4.button("삭제", key=f"leave_del_{i}"): st.session_state.resident_leaves.pop(i); st.rerun()
+    if st.session_state.resident_leaves:
+        with st.expander(f"📋 등록된 휴가 ({len(st.session_state.resident_leaves)}건)", expanded=True):
+            # 신청자(전공의)별로 묶어서 표시 — 원래 인덱스는 삭제용으로 보존
+            from collections import defaultdict as _dd
+            groups = _dd(list)
+            for i, lv in enumerate(st.session_state.resident_leaves):
+                groups[lv['이름']].append((i, lv))
+            # 명단 순서 우선, 명단에 없는 이름은 뒤에 이름순
+            ordered_names = [n for n in res_names if n in groups] + sorted(n for n in groups if n not in res_names)
+            for name in ordered_names:
+                items = sorted(groups[name], key=lambda x: x[1]['날짜'])
+                st.markdown(f"**👤 {name}** · {len(items)}건")
+                n_cols = 3
+                grid_cols = st.columns(n_cols)
+                for pos, (i, lv) in enumerate(items):
+                    with grid_cols[pos % n_cols]:
+                        cc1, cc2 = st.columns([5, 1])
+                        cc1.write(f"{lv['날짜']} [{lv['종류']}]")
+                        if cc2.button("X", key=f"leave_del_{i}"):
+                            st.session_state.resident_leaves.pop(i)
+                            st.rerun()
 
 # 탭 인덱스 6 (기존 5): 스케줄 배정
 with tabs[6]:
@@ -458,32 +490,26 @@ with tabs[6]:
             diagnosis_result = None
 
     st.markdown("---")
-    # === 배정 방식 선택 ===
-    mode_col1, mode_col2, mode_col3 = st.columns([2, 1, 1])
-    with mode_col1:
-        st.session_state.use_cpsat = st.toggle(
-            "🧮 CP-SAT 모드 (정확한 해 보장)",
-            value=st.session_state.use_cpsat,
-            help="ON: 수학적 제약 만족 솔버 (모든 룰 보장, 해가 없으면 알림). OFF: 기존 점수 방식 (빠르지만 룰 일부 위반 가능)"
-        )
+    # === CP-SAT 솔버 설정 (CP-SAT 모드 상시 사용) ===
+    st.session_state.use_cpsat = True
+    st.caption("🧮 CP-SAT 솔버로 배정합니다 (모든 룰 보장, 해가 없으면 알림).")
+    mode_col2, mode_col3 = st.columns(2)
     with mode_col2:
-        if st.session_state.use_cpsat:
-            st.session_state.cpsat_time_limit = st.number_input(
-                "제한시간(초)", min_value=10, max_value=600, value=st.session_state.cpsat_time_limit, step=10
-            )
+        st.session_state.cpsat_time_limit = st.number_input(
+            "제한시간(초)", min_value=10, max_value=600, value=st.session_state.cpsat_time_limit, step=10
+        )
     with mode_col3:
-        if st.session_state.use_cpsat:
-            # 배율 옵션: 자동 또는 1.025~1.200 (0.025 단위)
-            mult_options = ["자동"] + [f"{x/1000:.3f}" for x in range(1025, 1201, 25)]
-            current = st.session_state.cpsat_manual_multiplier
-            if current not in mult_options:
-                current = "자동"
-            st.session_state.cpsat_manual_multiplier = st.selectbox(
-                "배율 강제 지정",
-                options=mult_options,
-                index=mult_options.index(current),
-                help="'자동'이면 시스템이 사전 진단으로 산출. 직접 지정하면 그 배율로 풀이."
-            )
+        # 배율 옵션: 자동 또는 1.025~1.200 (0.025 단위)
+        mult_options = ["자동"] + [f"{x/1000:.3f}" for x in range(1025, 1201, 25)]
+        current = st.session_state.cpsat_manual_multiplier
+        if current not in mult_options:
+            current = "자동"
+        st.session_state.cpsat_manual_multiplier = st.selectbox(
+            "배율 강제 지정",
+            options=mult_options,
+            index=mult_options.index(current),
+            help="'자동'이면 시스템이 사전 진단으로 산출. 직접 지정하면 그 배율로 풀이."
+        )
 
     if st.button("🚀 자동 스케줄 랜덤 생성 (플랜 B 포함)", use_container_width=True, type="primary"):
         if not st.session_state.residents: st.error("전공의 명단을 등록해주세요.")
@@ -524,6 +550,14 @@ with tabs[6]:
                     )
 
                 if cpsat_result['status'] in ['OPTIMAL', 'FEASIBLE']:
+                    # 이동 전 원래 날짜 기록 (검증 탭에서 '누락'이 아닌 '이동'으로 인식시키기 위해 필수)
+                    _date_ovr = cpsat_result.get('task_date_overrides', {})
+                    original_df_dates = {}
+                    for tid in _date_ovr:
+                        _row = df_gen[df_gen['task_id'] == tid]
+                        if not _row.empty:
+                            original_df_dates[tid] = _row.iloc[0]['date']
+                    st.session_state.cpsat_original_df_dates = original_df_dates
                     # 비고정 task의 시간 결정 적용 (df_gen에 time 컬럼 업데이트)
                     for tid, t_choice in cpsat_result.get('task_time_overrides', {}).items():
                         df_gen.loc[df_gen['task_id'] == tid, 'time'] = t_choice
@@ -1038,6 +1072,7 @@ with tabs[9]:
                 task_date_overrides=st.session_state.get("cpsat_task_date_overrides", {}),
                 task_time_overrides=st.session_state.get("cpsat_task_time_overrides", {}),
                 shifted_tasks=st.session_state.get("cpsat_shifted_tasks", []),
+                original_df_dates=st.session_state.get("cpsat_original_df_dates", {}),
             )
 
             # 전체 요약
