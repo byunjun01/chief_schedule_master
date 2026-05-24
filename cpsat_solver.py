@@ -8,15 +8,17 @@ CP-SAT (OR-Tools) 기반 의국 스케줄 자동 배정 솔버.
   H2.  한 사람 한 세션 = task 1개
   H3.  보건소 담당자: 매주 월~금 오전 연보, 화/목 오후 연보 고정. 그 외 X
   H3-1. 보건소 휴가 시 bogeonso_substitutes 대체자 강제 배정
-  H4.  영상 파견자: 1주일에 조비룡 또는 박민선 클리닉 판정/차리 1개. 그 외 X
+  H4.  영상 파견자: 1주일에 조비룡 또는 박민선 클리닉 차리/판정 1개. 그 외 X
   H5.  휴가/공휴일/메인외래/학생실습/영상파견 슬롯에 task 안 받음
   H6.  R3 본인 메인외래 요일에 일반 task X (H5에 포함)
   H7.  시간 고정 task: 조수환 건증 판정(오전), 모든 참관/처치/예진
-       비고정 task: 차리, 건증 판정 (조수환 제외), 클리닉 판정/차리 등 → 오전/오후 자유
-  H8.  R3 (영상 제외) 일반 판정 = 정확히 1개 (클리닉 판정/차리는 카운트 X)
+       비고정 task: 차리, 건증 판정 (조수환 제외), 클리닉 차리/판정 등 → 오전/오후 자유
+  H8.  R3 (영상 제외) 일반 판정 = 정확히 1개 (클리닉 차리/판정는 카운트 X)
+  H8b. R3 (영상 제외) 판정 참관 = 정확히 1개
+  H8c. R3의 판정(H8)과 판정참관(H8b)은 반드시 같은 묶음 (단독 판정/참관 금지)
   H9.  R0 + R1 의국처음 = 처치 X
   H10. 조비룡/박민선 외래 차리/참관, 예진 = R3만
-  H11. Pairing 묶음 = 같은 사람 (최대 5개까지 깨도 OK)
+  H11. Pairing 묶음 = 같은 사람 (건증·박진호 묶음은 절대 안 깸, 그 외 최대 5개까지 깨도 OK)
   H12. 처치(오전), 처치(오후)의 90% 이상 = R3 + R2
   H13. 박진호 통증클리닉 사전 신청자 우선 (신청자 중 1명에게 무조건)
   H14. R1 처치 최대 1개
@@ -24,9 +26,12 @@ CP-SAT (OR-Tools) 기반 의국 스케줄 자동 배정 솔버.
   H16. 그룹 내부 max-min ≤ 0.3
   H17. strict 부등호 chain: max(의국/교육) < min(학생/진료) < min(일반R3) < min(R2) < min(R1/R0)
   H18. R2 주당 판정 ~1, R1/R0 주당 판정 ~1, ±1~2 변동 허용 + 결과 표시
-  H19. R3 (영상 제외) 클리닉 판정/차리 후순위 (영상 못 받은 경우만)
+  H19. R3 (영상 제외) 클리닉 차리/판정 후순위 (영상 못 받은 경우만)
   H20. 빈 슬롯 < task 수 → pairing 없는 task 우선 미배정
+  H21. 같은 연차 내 판정 수 max-min ≤ 2
+  H22. 보건소 직전휴가로 대체된 연보 세션 수만큼 처치(오후) 배정
   S5.  교수 중복 최소화 (목적함수)
+  설정값: 깨도 되는 pairing 수(max_broken_pairs, 기본 5), 차리/판정 추가 -1 이동 허용 수(extra_shift_allowance, 기본 0)
 
 사전 진단: 해 못 찾으면 target_mult 배율 자동 상향 (1.0 → 1.5)
 배율 1.5에서도 infeasible → "해가 없습니다" 알림
@@ -53,10 +58,15 @@ def _is_panjung_task(task_name):
     return "판정" in task_name and "참관" not in task_name
 
 
+def _is_panjung_obs_task(task_name):
+    """판정 참관 task (예: 'Pf. ... 판정 참관 (오전)')"""
+    return "판정" in task_name and "참관" in task_name
+
+
 def _is_clinic_panjung_chari(task_name):
-    """조비룡/박민선 클리닉 판정/차리 묶음"""
+    """조비룡/박민선 클리닉 차리/판정 묶음"""
     return (any(p in task_name for p in ["조비룡", "박민선"])
-            and "클리닉" in task_name and "판정/차리" in task_name)
+            and "클리닉" in task_name and "차리/판정" in task_name)
 
 
 def _is_r3_only_task(task_name):
@@ -129,7 +139,7 @@ def get_loading_group(resident, rad_days_dict):
 # 사용자 정의: 각 그룹 사이 겹치지 않게 정의 → strict < 부등호 자연스럽게 만족
 LOADING_RANGES = {
     0: (4.9, 5.5),   # 의국/교육수석
-    1: (6.0, 6.4),   # 학생/진료수석
+    1: (6.3, 6.8),   # 학생/진료수석
     2: (6.5, 7.2),   # 일반 R3
     3: (7.3, 7.9),   # R2
     4: (8.0, 9.0),   # R1/R0
@@ -404,6 +414,32 @@ def build_problem_data(df_all, residents, leaves, week_count, start_date, holida
     for (pname, _, _), _ in forced_assignments.items():
         person_forced_count[pname] = person_forced_count.get(pname, 0) + 1
 
+    # 6) 보건소 직전휴가 보충: 직전휴가로 '대체자가 지정되어' 대체된 연보 세션 수만큼
+    #    그 보건소 담당자에게 처치(오후)를 배정 (H22). 세션 = 오전(항상) + 화/목 오후
+    bogeonso_jikjeon_makeup = {}
+    for p in persons:
+        if not p['is_bogeonso']:
+            continue
+        name = p['name']
+        n = 0
+        for l in leaves:
+            if l['이름'] != name or l.get('종류') != '직전휴가':
+                continue
+            ds = l['날짜']
+            if ds in holidays:
+                continue
+            if not bogeonso_substitutes.get(ds):  # 대체자 지정된 날짜만 ('다른사람이 대체')
+                continue
+            n += 1  # 오전 연보
+            try:
+                wd = datetime.strptime(f"{start_date.year}-{ds}", "%Y-%m-%d").weekday()
+                if wd in (1, 3):  # 화/목
+                    n += 1  # 오후 연보
+            except Exception:
+                pass
+        if n > 0:
+            bogeonso_jikjeon_makeup[name] = n
+
     return {
         'tasks': tasks,
         'persons': persons,
@@ -420,6 +456,7 @@ def build_problem_data(df_all, residents, leaves, week_count, start_date, holida
         'rad_days': rad_days,
         'student_practices': student_practices,
         'pain_applicants': pain_applicants,
+        'bogeonso_jikjeon_makeup': bogeonso_jikjeon_makeup,
     }
 
 
@@ -437,9 +474,19 @@ class CPSATScheduleSolver:
         result = solver.solve(time_limit_sec=60)
     """
 
-    def __init__(self, problem_data, target_mult_multiplier=1.0):
+    def __init__(self, problem_data, target_mult_multiplier=1.0, loading_ranges=None, h17_ops=None,
+                 max_broken_pairs=5, shortage_shift_tids=None, extra_shift_limit=0):
         self.data = problem_data
         self.target_mult_multiplier = target_mult_multiplier
+        # 로딩 범위 (그룹 0~4의 (하한, 상한)). None이면 모듈 기본값 LOADING_RANGES 사용.
+        self.loading_ranges = {g: tuple(loading_ranges[g]) for g in range(5)} if loading_ranges else dict(LOADING_RANGES)
+        # H17 부등호: 인접 그룹 경계 0~3의 연산자 ('<', '<=', '='). None이면 모두 '<' (strict).
+        self.h17_ops = dict(h17_ops) if h17_ops else {0: '<', 1: '<', 2: '<', 3: '<'}
+        # H11: 깨도 되는 pairing 최대 개수 (건증/박진호 묶음은 별도로 항상 보호)
+        self.max_broken_pairs = max_broken_pairs
+        # 차리/판정 -1 이동: 슬롯부족(shortage)으로 허용된 task는 무제한, 그 외 추가 이동은 extra_shift_limit개까지
+        self.shortage_shift_tids = set(shortage_shift_tids) if shortage_shift_tids else set()
+        self.extra_shift_limit = extra_shift_limit
         self.model = cp_model.CpModel()
         self.tasks = problem_data['tasks']
         self.persons = problem_data['persons']
@@ -598,11 +645,16 @@ class CPSATScheduleSolver:
         """
         H3: 보건소 담당자는 일반 task 받지 않음 (모든 x = 0)
         보건소 task 자체는 df_all에 없음 (별도 처리). 보건소 담당자는 그냥 일반 task에서 제외.
+        예외: 직전휴가 보충(H22) 대상자는 처치(오후)는 허용 (H22가 정확히 N개로 통제).
         """
+        makeup = self.data.get('bogeonso_jikjeon_makeup', {})
         for p in self.persons:
             if p['is_bogeonso']:
                 pname = p['name']
+                allow_tx_pm = makeup.get(pname, 0) > 0
                 for t in self.tasks:
+                    if allow_tx_pm and t['task'] == '처치 (오후)':
+                        continue  # H22가 처치(오후)를 정확히 N개로 배정
                     self.model.Add(self.x[(t['task_id'], pname)] == 0)
 
     # ----- H4: 영상 파견자 -----
@@ -611,7 +663,7 @@ class CPSATScheduleSolver:
         H4 (e1): 영상 파견자 주당 처리
           - 클리닉 task를 받을 수 있는 슬롯이 있는 주 → 클리닉 정확히 1개 (==1), 그 외 task X
           - 클리닉 받을 슬롯이 없는 주 → 처치 또는 예진 정확히 1개 (==1), 그 외 task X
-        + 클리닉 판정/차리는 영상 파견자 + R2만 받을 수 있음
+        + 클리닉 차리/판정는 영상 파견자 + R2만 받을 수 있음
         """
         # 영상 파견자별 처리
         for p in self.persons:
@@ -682,7 +734,7 @@ class CPSATScheduleSolver:
                             if t['week'] != w: continue
                             self.model.Add(self.x[(t['task_id'], pname)] == 0)
 
-        # 클리닉 판정/차리는 영상 파견자 또는 R2만 받음 (그 외 hard 제외)
+        # 클리닉 차리/판정는 영상 파견자 또는 R2만 받음 (그 외 hard 제외)
         # = R3 일반(영상X) + R1/R0는 받을 수 없음
         clinic_task_ids = [t['task_id'] for t in self.tasks if _is_clinic_panjung_chari(t['task'])]
         for p in self.persons:
@@ -699,7 +751,7 @@ class CPSATScheduleSolver:
     def add_h8_r3_panjung(self):
         """
         H8: R3 (영상 파견자 제외) 일반 판정 = 정확히 1개
-            클리닉 판정/차리는 판정 카운트에서 제외
+            클리닉 차리/판정는 판정 카운트에서 제외
         """
         panjung_task_ids = [t['task_id'] for t in self.tasks
                             if _is_panjung_task(t['task'])
@@ -709,6 +761,64 @@ class CPSATScheduleSolver:
                 continue
             pname = p['name']
             self.model.Add(sum(self.x[(tid, pname)] for tid in panjung_task_ids) == 1)
+
+    # ----- H8b: R3 판정 참관 정확히 1개 -----
+    def add_h8b_r3_panjung_obs(self):
+        """
+        H8b: R3 (영상 파견자 제외) 판정 참관 = 정확히 1개
+        """
+        panjung_obs_task_ids = [t['task_id'] for t in self.tasks
+                                if _is_panjung_obs_task(t['task'])]
+        for p in self.persons:
+            if p['year'] != 'R3' or p['is_rad']:
+                continue
+            pname = p['name']
+            self.model.Add(sum(self.x[(tid, pname)] for tid in panjung_obs_task_ids) == 1)
+
+    # ----- H8c: R3의 판정과 판정참관은 반드시 같은 묶음(pair) -----
+    def add_h8c_r3_panjung_pair(self):
+        """
+        H8c: R3가 받는 판정(H8)과 판정참관(H8b)은 반드시 짝지어진 같은 묶음이어야 함.
+          - 짝(판정 또는 참관)이 데이터에 없는 '단독' task는 R3가 받지 못함
+            (윈도우 경계에서 짝이 잘린 판정/참관 = orphan)
+          - 같은 pair_id 안에서 R3가 받은 판정 수 == 받은 참관 수
+          H8(판정=1)+H8b(참관=1)와 결합되면, R3는 정확히 하나의 완전한 (판정+참관) 묶음을 받게 됨.
+        """
+        from collections import defaultdict
+        pair_pj = defaultdict(list)  # pid -> [판정 task_id]
+        pair_ob = defaultdict(list)  # pid -> [판정참관 task_id]
+        for t in self.tasks:
+            pid = t['pair_id']
+            if _is_panjung_task(t['task']) and not _is_clinic_panjung_chari(t['task']):
+                pair_pj[pid].append(t['task_id'])
+            elif _is_panjung_obs_task(t['task']):
+                pair_ob[pid].append(t['task_id'])
+
+        # 완전한 묶음: pair_id(비어있지 않음)에 판정과 참관이 모두 존재
+        full_pairs = set(pid for pid in pair_pj if pid and pid in pair_ob)
+
+        # 단독(orphan) 판정/참관 task: pair_id 없거나 짝이 데이터에 없음
+        orphan_tids = []
+        for pid, tids in pair_pj.items():
+            if pid not in full_pairs:
+                orphan_tids.extend(tids)
+        for pid, tids in pair_ob.items():
+            if pid not in full_pairs:
+                orphan_tids.extend(tids)
+
+        for p in self.persons:
+            if p['year'] != 'R3' or p['is_rad']:
+                continue
+            pname = p['name']
+            # 단독 판정/참관 금지
+            for tid in orphan_tids:
+                self.model.Add(self.x[(tid, pname)] == 0)
+            # 같은 묶음 안에서 판정 수 == 참관 수
+            for pid in full_pairs:
+                self.model.Add(
+                    sum(self.x[(tid, pname)] for tid in pair_pj[pid])
+                    == sum(self.x[(tid, pname)] for tid in pair_ob[pid])
+                )
 
     # ----- H9: R0/의국처음 처치 X -----
     def add_h9_rookie_no_tx(self):
@@ -731,14 +841,15 @@ class CPSATScheduleSolver:
             for tid in r3_only_task_ids:
                 self.model.Add(self.x[(tid, pname)] == 0)
 
-    # ----- H11: Pairing (최대 5개 깨도 OK) -----
+    # ----- H11: Pairing (건증 묶음 제외 최대 5개 깨도 OK) -----
     def add_h11_pairing(self):
         """
-        H11: 같은 pair_id의 task는 같은 사람에게 (최대 5개 묶음까지 깨도 OK).
+        H11: 같은 pair_id의 task는 같은 사람에게.
+          - 건증 묶음(건증 판정 + 판정 참관) 및 박진호 묶음(외래/통증클리닉)은 절대 분리 안 함 (broken = 0 강제)
+          - 그 외 묶음은 최대 5개까지 깨도 OK (Σ broken_pair ≤ 5)
         구현:
           - 각 pair_id의 task들에 대해 broken_pair 변수 생성
           - 묶음이 모두 같은 사람이면 broken = 0, 다르면 broken = 1
-          - Σ broken_pair ≤ 5
         """
         pair_groups = {}
         for t in self.tasks:
@@ -751,6 +862,13 @@ class CPSATScheduleSolver:
                 continue
             bp = self.model.NewBoolVar(f"broken_{pid}")
             self.broken_pair[pid] = bp
+            # 절대 분리 금지 묶음 → broken = 0 강제 (≤5 캡과 무관하게 항상 유지)
+            #   - 건증 묶음 (건증 판정 + 판정 참관)
+            #   - 박진호 묶음 (외래/통증클리닉 차리 + 참관)
+            pair_task_names = [self.task_by_id[tid]['task'] for tid in tids]
+            no_break = any(("건증" in tn or "박진호" in tn) for tn in pair_task_names)
+            if no_break:
+                self.model.Add(bp == 0)
             # 묶음의 모든 task가 같은 사람 → broken = 0
             # 즉 각 person별로: 한 사람이 묶음 task 다 받거나 (sum=len) 0개 받거나 (sum=0)
             # 둘 다 아니면 broken=1
@@ -775,9 +893,9 @@ class CPSATScheduleSolver:
                     # diff implies bp
                     self.model.Add(bp >= diff)
 
-        # 총 깨진 묶음 ≤ 5
+        # 총 깨진 묶음 ≤ max_broken_pairs (건증/박진호 묶음은 위에서 broken=0 강제라 합산에서 0)
         if self.broken_pair:
-            self.model.Add(sum(self.broken_pair.values()) <= 5)
+            self.model.Add(sum(self.broken_pair.values()) <= self.max_broken_pairs)
 
     # ----- H12: 처치 90% 이상 R3+R2 -----
     def add_h12_tx_90pct(self):
@@ -866,18 +984,20 @@ class CPSATScheduleSolver:
                 self.model.Add(a - b <= 2)
                 self.model.Add(b - a <= 2)
 
-    # ----- H15, H16, H17: 로딩 ----- 
+    # ----- H15, H16, H17: 로딩 -----
     def add_h15_h16_h17_loading(self):
         """
-        H15: 로딩 범위 (그룹별)
-        H16: 그룹 내 max - min ≤ 0.3
-        H17: strict 부등호 chain
-        
+        H15: 로딩 범위 (그룹별, self.loading_ranges)
+        H16: 그룹(병합 클러스터) 내 max - min ≤ 0.3
+        H17: 인접 그룹 부등호 (self.h17_ops: '<' strict / '<=' non-strict / '=' 병합)
+
         로딩 = (배정 task 수 × 10) / avail
         CP-SAT는 정수만 다루므로, 로딩 * 100을 정수로 (소수점 2자리 정밀도)
         loading_int = (배정 수 × 1000) / avail  (1000 = 10 × 100)
         """
         MULT = self.target_mult_multiplier
+        ranges = self.loading_ranges       # {0..4: (lo, hi)}
+        ops = self.h17_ops                 # {0..3: '<'/'<='/'='}
         forced_count = self.data.get('person_forced_count', {})
         # 사람별 배정 task 수 변수 (정수) + 강제 연보 슬롯 합산
         person_assigned = {}
@@ -891,46 +1011,52 @@ class CPSATScheduleSolver:
             self.model.Add(count_var == sum(self.x[(t['task_id'], pname)] for t in self.tasks) + forced)
             person_assigned[pname] = count_var
 
-        # 사람별 loading_int = (count × 1000) // avail
-        # CP-SAT: loading_int * avail == count * 1000 - remainder
-        # 더 간단: loading 범위를 count 범위로 환산
-        # H15: range[lo, hi] (배율 적용) → count 범위 [lo × MULT × avail / 10, hi × MULT × avail / 10]
-        # 단, R3 영상은 그룹 -1로 제외됨
+        # ----- '=' 로 연결된 인접 그룹은 한 클러스터로 병합 -----
+        # ops[g]가 '='면 그룹 g와 g+1을 같은 클러스터로 취급 (한 그룹처럼).
+        cluster_of = {0: 0}
+        for g in range(1, 5):
+            if ops.get(g - 1) == '=':
+                cluster_of[g] = cluster_of[g - 1]
+            else:
+                cluster_of[g] = cluster_of[g - 1] + 1
+        # 클러스터별 통합 로딩 범위 = (병합된 그룹들의 min 하한, max 상한)
+        cluster_range = {}
+        for g in range(5):
+            c = cluster_of[g]
+            lo, hi = ranges[g]
+            if c not in cluster_range:
+                cluster_range[c] = [lo, hi]
+            else:
+                cluster_range[c][0] = min(cluster_range[c][0], lo)
+                cluster_range[c][1] = max(cluster_range[c][1], hi)
 
-        person_count_range = {}  # {pname: (count_lo, count_hi)}
+        # H15: 각 사람의 로딩을 자기 클러스터 범위 [lo, hi] (배율 적용) → count 범위로 환산
+        # 단, R3 영상은 그룹 -1로 제외됨
         for p in self.persons:
             if p['group'] == -1:
                 continue
             pname = p['name']
             avail = self.person_avail_sessions[pname]
-            lo_load, hi_load = LOADING_RANGES[p['group']]
+            lo_load, hi_load = cluster_range[cluster_of[p['group']]]
             lo_load *= MULT
             hi_load *= MULT
-            # count = loading × avail / 10
-            # 하한은 올림(ceil)해야 loading >= lo_load 보장 (이전 int() 버그: 8.0*24/10=19.2 → int=19 → 로딩 7.92로 위반)
+            # 하한은 올림(ceil)해야 loading >= lo_load 보장
             count_lo = math.ceil(lo_load * avail / 10)
             # 상한은 내림(floor)해야 loading <= hi_load 보장
             count_hi = math.floor(hi_load * avail / 10)
-            # 안전장치: count_lo > count_hi면 해 없음 (예: avail이 너무 작아 범위 안 들어감)
-            # 이때는 좁은 범위 그대로 (CP-SAT가 INFEASIBLE 판정)
-            person_count_range[pname] = (count_lo, count_hi, avail)
             self.model.Add(person_assigned[pname] >= count_lo)
             self.model.Add(person_assigned[pname] <= count_hi)
 
-        # H16: 그룹 내 max - min ≤ 0.3 × MULT
-        # loading_int 표현: count × 1000 / avail (정수 division 문제)
-        # 더 간단: 그룹 내 두 사람 p1, p2에 대해
-        #   |count1/avail1 - count2/avail2| ≤ 0.03 (loading 단위로 0.3 → 분자 10배 → 3)
-        # 즉 |count1 × avail2 × 10 - count2 × avail1 × 10| ≤ 0.3 × avail1 × avail2
-        # 정수화: |count1 × avail2 × 10 - count2 × avail1 × 10| ≤ floor(0.3 × avail1 × avail2)
-        # → |count1 × avail2 - count2 × avail1| × 10 ≤ floor(0.3 × MULT × avail1 × avail2)
+        # H16: 같은 클러스터 내 두 사람의 로딩 차이 ≤ 0.3 × MULT
+        #   |count1/avail1 - count2/avail2| ≤ 0.03 (로딩 단위 0.3 → 분자 10배 → 3)
+        #   → |count1 × avail2 - count2 × avail1| × 10 ≤ floor(0.3 × MULT × avail1 × avail2)
         DIFF_LIMIT = 0.3 * MULT  # 로딩 차이 한도
-        groups = {0: [], 1: [], 2: [], 3: [], 4: []}
+        clusters = {}
         for p in self.persons:
             if p['group'] != -1:
-                groups[p['group']].append(p['name'])
+                clusters.setdefault(cluster_of[p['group']], []).append(p['name'])
 
-        for g, names in groups.items():
+        for c, names in clusters.items():
             if len(names) < 2:
                 continue
             for i in range(len(names)):
@@ -938,18 +1064,23 @@ class CPSATScheduleSolver:
                     n1, n2 = names[i], names[j]
                     a1 = self.person_avail_sessions[n1]
                     a2 = self.person_avail_sessions[n2]
-                    # |c1 × a2 × 10 - c2 × a1 × 10| ≤ floor(DIFF_LIMIT × a1 × a2)
                     limit = int(DIFF_LIMIT * a1 * a2)
                     self.model.Add(person_assigned[n1] * a2 * 10 - person_assigned[n2] * a1 * 10 <= limit)
                     self.model.Add(person_assigned[n2] * a1 * 10 - person_assigned[n1] * a2 * 10 <= limit)
 
-        # H17: strict 부등호 chain
-        # max(group_i) × avail_j < min(group_{i+1}) × avail_i (정수화로 + 1)
-        # 즉 모든 i 그룹 사람 × i+1 그룹 사람 쌍에 대해:
-        #   count_i / avail_i < count_{i+1} / avail_{i+1}
-        #   count_i × avail_{i+1} × 10 < count_{i+1} × avail_i × 10
-        #   정수 strict <: count_i × avail_{i+1} × 10 + 1 ≤ count_{i+1} × avail_i × 10
+        # H17: 인접 그룹 부등호 (경계 g = 0..3)
+        #   '<'  strict   : count_low × a_high × 10 + 1 ≤ count_high × a_low × 10
+        #   '<=' non-strict: count_low × a_high × 10     ≤ count_high × a_low × 10
+        #   '='  병합       : 부등호 없음 (H15 범위 + H16 차이로 한 그룹 처리)
+        groups = {0: [], 1: [], 2: [], 3: [], 4: []}
+        for p in self.persons:
+            if p['group'] != -1:
+                groups[p['group']].append(p['name'])
+
         for g in range(4):
+            op = ops.get(g, '<')
+            if op == '=':
+                continue  # 병합 — 위 H15/H16에서 한 클러스터로 처리됨
             higher_g = g + 1
             if not groups[g] or not groups[higher_g]:
                 continue
@@ -957,11 +1088,16 @@ class CPSATScheduleSolver:
                 for n_high in groups[higher_g]:
                     a_low = self.person_avail_sessions[n_low]
                     a_high = self.person_avail_sessions[n_high]
-                    # count_low × a_high × 10 + 1 ≤ count_high × a_low × 10
-                    self.model.Add(
-                        person_assigned[n_low] * a_high * 10 + 1
-                        <= person_assigned[n_high] * a_low * 10
-                    )
+                    if op == '<':
+                        self.model.Add(
+                            person_assigned[n_low] * a_high * 10 + 1
+                            <= person_assigned[n_high] * a_low * 10
+                        )
+                    else:  # '<='
+                        self.model.Add(
+                            person_assigned[n_low] * a_high * 10
+                            <= person_assigned[n_high] * a_low * 10
+                        )
 
         self.person_assigned = person_assigned  # 다른 메서드에서 참조
 
@@ -1029,15 +1165,81 @@ class CPSATScheduleSolver:
                 for r1_name, r1_var in r1r0_panjung.items():
                     self.model.Add(r2_var + 1 <= r1_var)
 
-    # ----- H19: R3 일반 클리닉 판정/차리 후순위 -----
+    # ----- H19: R3 일반 클리닉 차리/판정 후순위 -----
     def add_h19_r3_clinic_soft(self):
         """
-        H19 soft: 영상 파견자가 못 받은 클리닉 판정/차리는 R3 일반도 받을 수 있음
+        H19 soft: 영상 파견자가 못 받은 클리닉 차리/판정는 R3 일반도 받을 수 있음
         (별도 제약 추가 없이 H4의 ≤ 1로 영상 파견자가 최대한 받고, 남은 건 자유롭게 배정됨)
-        단, R3 영상 제외는 H8에서 일반 판정 1개 강제. 클리닉 판정/차리는 일반 판정 카운트 X (H8 정의대로).
+        단, R3 영상 제외는 H8에서 일반 판정 1개 강제. 클리닉 차리/판정는 일반 판정 카운트 X (H8 정의대로).
         """
         # 추가 제약 없음 (H4와 H8이 이미 처리)
         pass
+
+    # ----- 차리/판정 -1 이동 추가 허용 한도 -----
+    def add_shift_allowance_limit(self):
+        """
+        슬롯부족(shortage)으로 허용된 task가 아닌, '추가로' -1 이동하는 차리/판정 수를
+        extra_shift_limit개 이하로 제한.
+        - shortage task: 무제한 (필요하면 이동)
+        - 그 외 task: 합쳐서 extra_shift_limit개까지만 이동 허용
+        date_var[tid]==1 (원래 날짜), ==0 (이동). 이동 수 = len - sum(date_var).
+        """
+        extra_tids = [tid for tid in self.date_var if tid not in self.shortage_shift_tids]
+        if not extra_tids:
+            return
+        # 이동(=0)한 수 ≤ extra_shift_limit  ⟺  원래날짜(=1) 수 ≥ len - extra_shift_limit
+        self.model.Add(
+            sum(self.date_var[tid] for tid in extra_tids) >= len(extra_tids) - self.extra_shift_limit
+        )
+
+    # ----- H21: 같은 연차 내 판정 수 max-min ≤ 2 -----
+    def add_h21_year_panjung_diff(self):
+        """
+        H21: 같은 연차(R3/R2/R1/R0) 내에서 일반 판정 개수의 최대 차이 ≤ 2.
+             (영상 파견자/보건소 = group -1 제외. 일반 판정 = 참관/클리닉 차리/판정 제외)
+        """
+        panjung_task_ids = [t['task_id'] for t in self.tasks
+                            if _is_panjung_task(t['task'])
+                            and not _is_clinic_panjung_chari(t['task'])]
+        if not panjung_task_ids:
+            return
+        # 연차별 사람 그룹 (group -1 = 영상/보건소 제외)
+        year_groups = {}
+        for p in self.persons:
+            if p['group'] == -1:
+                continue
+            year_groups.setdefault(p['year'], []).append(p['name'])
+        # 사람별 판정 수 변수
+        pj_count = {}
+        for p in self.persons:
+            if p['group'] == -1:
+                continue
+            pname = p['name']
+            cv = self.model.NewIntVar(0, len(panjung_task_ids), f"pjcnt_{pname}")
+            self.model.Add(cv == sum(self.x[(tid, pname)] for tid in panjung_task_ids))
+            pj_count[pname] = cv
+        # 같은 연차 내 모든 쌍에 대해 |c_i - c_j| ≤ 2
+        for yr, names in year_groups.items():
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    a, b = pj_count[names[i]], pj_count[names[j]]
+                    self.model.Add(a - b <= 2)
+                    self.model.Add(b - a <= 2)
+
+    # ----- H22: 보건소 직전휴가 보충(처치 오후) -----
+    def add_h22_bogeonso_makeup(self):
+        """
+        H22: 연건 보건소 담당자가 직전휴가를 써서 대체자가 대체한 연보 세션 수(N)만큼,
+             그 담당자에게 처치(오후)를 정확히 N개 배정.
+        """
+        makeup = self.data.get('bogeonso_jikjeon_makeup', {})
+        if not makeup:
+            return
+        tx_pm_tids = [t['task_id'] for t in self.tasks if t['task'] == '처치 (오후)']
+        if not tx_pm_tids:
+            return
+        for name, n in makeup.items():
+            self.model.Add(sum(self.x[(tid, name)] for tid in tx_pm_tids) == n)
 
     # ----- 목적함수 -----
     def build_objective(self):
@@ -1107,6 +1309,8 @@ class CPSATScheduleSolver:
         self.add_h3_bogeonso()
         self.add_h4_rad()
         self.add_h8_r3_panjung()
+        self.add_h8b_r3_panjung_obs()
+        self.add_h8c_r3_panjung_pair()
         self.add_h9_rookie_no_tx()
         self.add_h10_r3_only()
         self.add_h11_pairing()
@@ -1117,6 +1321,9 @@ class CPSATScheduleSolver:
         self.add_h15_h16_h17_loading()
         self.add_h18_weekly_panjung()
         self.add_h19_r3_clinic_soft()
+        self.add_h21_year_panjung_diff()
+        self.add_h22_bogeonso_makeup()
+        self.add_shift_allowance_limit()
         self.build_objective()
 
     def solve(self, time_limit_sec=60):
@@ -1244,7 +1451,8 @@ def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, ho
                             bogeonso_substitutes=None, rad_days=None, student_practices=None,
                             pain_applicants=None, target_mult_multiplier=1.0,
                             shift_allowed_tids=None, time_limit_sec=30,
-                            per_solve_time=5, enable_drop_two=False):
+                            per_solve_time=5, enable_drop_two=False,
+                            loading_ranges=None, h17_ops=None, max_broken_pairs=5):
     """
     INFEASIBLE 발생 시 어떤 룰들이 충돌하는지 진단.
     
@@ -1263,18 +1471,22 @@ def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, ho
     rule_descriptions = {
         'H4_rad': 'H4: 영상 파견자 주당 정확히 1개 (클리닉 or 처치/예진)',
         'H8_r3_panjung': 'H8: R3 (영상 제외) 일반 판정 = 정확히 1개',
+        'H8b_r3_panjung_obs': 'H8b: R3 (영상 제외) 판정 참관 = 정확히 1개',
+        'H8c_r3_panjung_pair': 'H8c: R3의 판정과 판정참관은 반드시 같은 묶음 (단독 판정/참관 금지)',
         'H9_rookie_no_tx': 'H9: R0/의국처음 R1 = 처치 X',
         'H10_r3_only': 'H10: 조비룡/박민선 외래 차리/참관 + 예진 = R3만',
-        'H11_pairing': 'H11: 차리/판정 + 참관 묶음 = 같은 사람 (최대 5개 깨도 OK)',
+        'H11_pairing': 'H11: 차리/판정 + 참관 묶음 = 같은 사람 (건증·박진호 묶음 절대 안 깸, 그 외 최대 5개 깨도 OK)',
         'H12_tx_90pct': 'H12: 처치(오전+오후) 90% 이상 R3+R2',
         'H13_pain_applicants': 'H13: 박진호 통증클리닉 사전 신청자 우선',
         'H14_r1_tx_max_1': 'H14: R1 처치 최대 1개',
         'H_tx_yejin_balance': 'H_TX_YEJIN: 처치+예진 합 (R2+R3 풀) max-min ≤ 2',
         'H15_h16_h17_loading': 'H15-17: 그룹별 로딩 범위 + 내부 차이 ≤ 0.3 + strict 부등호 chain',
         'H18_weekly_panjung': 'H18: R2 최소 3개 / R1/R0 최대 (week+5) / max(R2) < min(R1/R0)',
+        'H21_year_panjung_diff': 'H21: 같은 연차 내 판정 수 max-min ≤ 2',
+        'H22_bogeonso_makeup': 'H22: 보건소 직전휴가 대체분만큼 처치(오후) 배정',
     }
 
-    # 임시 빌드 (clinic 판정/차리 R2 only도 H4와 묶을 룰)
+    # 임시 빌드 (clinic 차리/판정 R2 only도 H4와 묶을 룰)
     pdata = build_problem_data(
         df_all, residents, leaves, week_count, start_date, holidays,
         bogeonso_substitutes=bogeonso_substitutes, rad_days=rad_days,
@@ -1283,7 +1495,9 @@ def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, ho
     )
 
     # 진단용 새 모델 — 각 룰에 assumption literal 부여
-    solver = CPSATScheduleSolver(pdata, target_mult_multiplier=target_mult_multiplier)
+    solver = CPSATScheduleSolver(pdata, target_mult_multiplier=target_mult_multiplier,
+                                 loading_ranges=loading_ranges, h17_ops=h17_ops,
+                                 max_broken_pairs=max_broken_pairs)
     solver.build_variables()
     # 필수 룰 (이건 진단에서 빼면 안 됨 — 모델 자체의 핵심)
     solver.add_h1_h2()
@@ -1305,6 +1519,8 @@ def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, ho
     rule_methods = [
         ('H4_rad', solver.add_h4_rad),
         ('H8_r3_panjung', solver.add_h8_r3_panjung),
+        ('H8b_r3_panjung_obs', solver.add_h8b_r3_panjung_obs),
+        ('H8c_r3_panjung_pair', solver.add_h8c_r3_panjung_pair),
         ('H9_rookie_no_tx', solver.add_h9_rookie_no_tx),
         ('H10_r3_only', solver.add_h10_r3_only),
         ('H11_pairing', solver.add_h11_pairing),
@@ -1314,13 +1530,17 @@ def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, ho
         ('H_tx_yejin_balance', solver.add_h_tx_yejin_balance),
         ('H15_h16_h17_loading', solver.add_h15_h16_h17_loading),
         ('H18_weekly_panjung', solver.add_h18_weekly_panjung),
+        ('H21_year_panjung_diff', solver.add_h21_year_panjung_diff),
+        ('H22_bogeonso_makeup', solver.add_h22_bogeonso_makeup),
     ]
 
     def _solve_with(rule_set, mult=target_mult_multiplier, time_limit=None):
         """rule_set만 추가하고 풀이"""
         if time_limit is None:
             time_limit = per_solve_time
-        s = CPSATScheduleSolver(pdata, target_mult_multiplier=mult)
+        s = CPSATScheduleSolver(pdata, target_mult_multiplier=mult,
+                                loading_ranges=loading_ranges, h17_ops=h17_ops,
+                                max_broken_pairs=max_broken_pairs)
         s.build_variables()
         s.add_h1_h2()
         s.add_h5_blocked()
@@ -1430,7 +1650,9 @@ def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, ho
 def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date, holidays,
                                 bogeonso_substitutes=None, rad_days=None, student_practices=None,
                                 pain_applicants=None, time_limit_sec=60,
-                                multipliers=None, manual_multiplier=None):
+                                multipliers=None, manual_multiplier=None,
+                                loading_ranges=None, h17_ops=None,
+                                max_broken_pairs=5, extra_shift_allowance=0):
     """
     재설계:
       1) manual_multiplier가 주어지면 그 배율 사용. 아니면 사전 진단으로 자동 산출.
@@ -1486,12 +1708,23 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
         if n_tasks > n_slots:
             shortage_dates.add(ds)
 
-    # 슬롯 부족 날짜의 차리/판정 task → shift_allowed_tids
-    shift_allowed_tids = set()
+    # 슬롯 부족 날짜의 차리/판정 task → shortage_shift_tids (항상 이동 허용, 무제한)
+    shortage_shift_tids = set()
     if shortage_dates:
         for t in pdata_temp['tasks']:
             if t['date'] not in shortage_dates:
                 continue
+            tn = t['task']
+            if "참관" in tn:
+                continue
+            if "차리" in tn or "판정" in tn:
+                shortage_shift_tids.add(t['task_id'])
+
+    # 추가 -1 이동 허용(extra_shift_allowance>0): 부족이 아니어도 차리/판정 전체를 이동 후보로 등록
+    # (실제 추가 이동 수는 솔버에서 extra_shift_allowance개까지로 캡)
+    shift_allowed_tids = set(shortage_shift_tids)
+    if extra_shift_allowance and extra_shift_allowance > 0:
+        for t in pdata_temp['tasks']:
             tn = t['task']
             if "참관" in tn:
                 continue
@@ -1505,7 +1738,11 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
         student_practices=student_practices, pain_applicants=pain_applicants,
         shift_allowed_tids=shift_allowed_tids
     )
-    solver = CPSATScheduleSolver(pdata, target_mult_multiplier=auto_mult)
+    solver = CPSATScheduleSolver(pdata, target_mult_multiplier=auto_mult,
+                                 loading_ranges=loading_ranges, h17_ops=h17_ops,
+                                 max_broken_pairs=max_broken_pairs,
+                                 shortage_shift_tids=shortage_shift_tids,
+                                 extra_shift_limit=extra_shift_allowance)
     solver.build_model()
     result = solver.solve(time_limit_sec=time_limit_sec)
 
@@ -1537,12 +1774,18 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
 
 def solve_schedule(df_all, residents, leaves, week_count, start_date, holidays,
                    bogeonso_substitutes=None, rad_days=None, student_practices=None,
-                   pain_applicants=None, time_limit_sec=60, manual_multiplier=None):
+                   pain_applicants=None, time_limit_sec=60, manual_multiplier=None,
+                   loading_ranges=None, h17_ops=None,
+                   max_broken_pairs=5, extra_shift_allowance=0):
     """
     app.py에서 호출하는 진입점.
-    
+
     manual_multiplier: float or None (None이면 자동, 값 지정하면 그 배율 사용)
-    
+    loading_ranges: {0..4: (lo, hi)} or None (None이면 기본 LOADING_RANGES)
+    h17_ops: {0..3: '<'/'<='/'='} or None (None이면 모두 '<')
+    max_broken_pairs: 깨도 되는 pairing 최대 개수 (기본 5)
+    extra_shift_allowance: 슬롯부족이 아니어도 -1 이동 허용할 차리/판정 추가 개수 (기본 0)
+
     Returns: dict
         - status: "OPTIMAL", "FEASIBLE", "INFEASIBLE_NO_SOLUTION"
         - assignments: {task_id: person_name}
@@ -1556,5 +1799,7 @@ def solve_schedule(df_all, residents, leaves, week_count, start_date, holidays,
         df_all, residents, leaves, week_count, start_date, holidays,
         bogeonso_substitutes=bogeonso_substitutes, rad_days=rad_days,
         student_practices=student_practices, pain_applicants=pain_applicants,
-        time_limit_sec=time_limit_sec, manual_multiplier=manual_multiplier
+        time_limit_sec=time_limit_sec, manual_multiplier=manual_multiplier,
+        loading_ranges=loading_ranges, h17_ops=h17_ops,
+        max_broken_pairs=max_broken_pairs, extra_shift_allowance=extra_shift_allowance
     )

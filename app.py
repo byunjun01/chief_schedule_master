@@ -28,6 +28,18 @@ if 'supplementary_schedules' not in st.session_state: st.session_state.supplemen
 if 'use_cpsat' not in st.session_state: st.session_state.use_cpsat = True  # CP-SAT 모드 (신규, 기본값)
 if 'cpsat_time_limit' not in st.session_state: st.session_state.cpsat_time_limit = 60
 if 'cpsat_manual_multiplier' not in st.session_state: st.session_state.cpsat_manual_multiplier = "자동"
+# 로딩 범위 기본값 (그룹 0~4의 (하한, 상한)) — 사용자가 설정해 둔 기본설정
+if 'loading_ranges' not in st.session_state:
+    st.session_state.loading_ranges = {0: [4.9, 5.5], 1: [6.3, 6.8], 2: [6.5, 7.2], 3: [7.3, 7.9], 4: [8.0, 9.0]}
+# H17 부등호 기본값 (경계 0~3: 그룹0<1, 1<2, 2<3, 3<4) — 모두 strict '<'
+if 'h17_ops' not in st.session_state:
+    st.session_state.h17_ops = {0: "<", 1: "<", 2: "<", 3: "<"}
+# 깨도 되는 pairing 최대 개수 (기본 5)
+if 'cpsat_max_broken_pairs' not in st.session_state:
+    st.session_state.cpsat_max_broken_pairs = 5
+# 슬롯부족이 아니어도 -1 이동 허용할 차리/판정 추가 개수 (기본 0)
+if 'cpsat_extra_shift' not in st.session_state:
+    st.session_state.cpsat_extra_shift = 0
 
 if 'master_schedules' not in st.session_state:
     st.session_state.master_schedules = pd.DataFrame(RAW_SCHEDULES_INITIAL, columns=["교수명", "요일", "시간", "진료명", "주기", "차리생성", "참관생성", "태그"])
@@ -271,7 +283,39 @@ with st.sidebar:
         st.session_state.supplementary_schedules = data.get("supplementary_schedules", [])
         st.session_state.master_schedules = pd.DataFrame(data.get("master_schedules", RAW_SCHEDULES_INITIAL))
         u_holidays = [h.strip() for h in st.session_state.user_holidays_str.split(',') if h.strip()]
-        st.session_state.current_df_all = generate_schedule(st.session_state.base_date, st.session_state.week_count, u_holidays, st.session_state.master_schedules, st.session_state.off_slots, supplementary_schedules=st.session_state.supplementary_schedules)
+        df_loaded = generate_schedule(st.session_state.base_date, st.session_state.week_count, u_holidays, st.session_state.master_schedules, st.session_state.off_slots, supplementary_schedules=st.session_state.supplementary_schedules)
+        # CP-SAT 오버라이드 복원 + df에 적용 (시간/날짜) — 안 하면 df와 배정 시간이 어긋나 개인별 뷰에 중복 표시됨
+        time_ovr = data.get("task_time_overrides", {})
+        date_ovr = data.get("task_date_overrides", {})
+        for tid, t_choice in time_ovr.items():
+            df_loaded.loc[df_loaded['task_id'] == tid, 'time'] = t_choice
+        _wk_kor = ['월', '화', '수', '목', '금', '토', '일']
+        for tid, new_date in date_ovr.items():
+            df_loaded.loc[df_loaded['task_id'] == tid, 'date'] = new_date
+            try:
+                _ndt = datetime.strptime(f"{st.session_state.base_date.year}-{new_date}", "%Y-%m-%d").date()
+                df_loaded.loc[df_loaded['task_id'] == tid, 'day'] = _wk_kor[_ndt.weekday()]
+                df_loaded.loc[df_loaded['task_id'] == tid, 'week'] = (_ndt - st.session_state.base_date).days // 7 + 1
+            except Exception:
+                pass
+        st.session_state.current_df_all = df_loaded
+        st.session_state.cpsat_task_time_overrides = time_ovr
+        st.session_state.cpsat_task_date_overrides = date_ovr
+        st.session_state.cpsat_shifted_tasks = data.get("shifted_tasks", [])
+        st.session_state.cpsat_original_df_dates = data.get("original_df_dates", {})
+        # 연보(보건소 등 강제 배정)는 백업에 없으므로 입력으로부터 재계산해 복원 (개인별/주차별 뷰의 연보 표시용)
+        try:
+            from cpsat_solver import build_problem_data as _bpd
+            _rad = {r['이름']: r.get('영상파견요일', []) for r in st.session_state.residents if "본원 영상" in r.get('역할', [])}
+            _pdata = _bpd(df_loaded, st.session_state.residents, st.session_state.resident_leaves,
+                          st.session_state.week_count, st.session_state.base_date, u_holidays,
+                          bogeonso_substitutes=st.session_state.bogeonso_substitutes, rad_days=_rad,
+                          student_practices=st.session_state.student_practices)
+            st.session_state.cpsat_forced_assignments = _pdata.get('forced_assignments', {})
+        except Exception:
+            st.session_state.cpsat_forced_assignments = {}
+        # 개인별/주차별 뷰용 res_daily_slots 재구성 (함수 정의 이후 rerun에서 처리)
+        st.session_state._needs_slot_rebuild = True
         st.rerun()
 
 if st.session_state.current_df_all.empty:
@@ -279,6 +323,80 @@ if st.session_state.current_df_all.empty:
     st.session_state.current_df_all = generate_schedule(st.session_state.base_date, st.session_state.week_count, user_holidays, st.session_state.master_schedules, st.session_state.off_slots, supplementary_schedules=st.session_state.supplementary_schedules)
 
 df_all = st.session_state.current_df_all
+
+def build_res_daily_slots(assignments, forced_assignments=None, df=None):
+    """assignments(+공휴일/휴가/메인외래/학생실습/연보/영상 오버레이)로 전공의별 daily_slots 재구성.
+    CP-SAT 자동배정과 '수동 배정 저장' 모두 이 함수를 써서 전공의 개인별/주차별 현황 뷰가
+    항상 최신 assignments와 일치하도록 한다.
+    df: 시간/날짜 오버라이드가 적용된 task df. None이면 st.session_state.current_df_all 사용.
+        (CP-SAT 직후엔 current_df_all이 아직 갱신 전이므로 반드시 df_gen을 넘겨야 함)
+    """
+    if forced_assignments is None:
+        forced_assignments = {}
+    u_hols = [h.strip() for h in st.session_state.user_holidays_str.split(',') if h.strip()]
+    cur_df = df if df is not None else st.session_state.current_df_all
+    rad_days_d = {r['이름']: r.get('영상파견요일', []) for r in st.session_state.residents if "본원 영상" in r.get('역할', [])}
+    wd_to_idx = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4}
+    res_slots = {}
+    for r in st.session_state.residents:
+        name = r['이름']
+        daily = {}
+        for w in range(st.session_state.week_count):
+            for d_idx in range(5):
+                ds = (st.session_state.base_date + timedelta(days=w*7+d_idx)).strftime("%m-%d")
+                daily[ds] = {'오전': None, '오후': None}
+        # 공휴일 (최우선)
+        for ds in daily:
+            if ds in u_hols:
+                daily[ds]['오전'] = '공휴일'; daily[ds]['오후'] = '공휴일'
+        # 휴가
+        for l in st.session_state.resident_leaves:
+            if l['이름'] == name and l['날짜'] in daily:
+                if daily[l['날짜']]['오전'] != '공휴일': daily[l['날짜']]['오전'] = l['종류']
+                if daily[l['날짜']]['오후'] != '공휴일': daily[l['날짜']]['오후'] = l['종류']
+        # 메인외래
+        main = r.get('메인외래', '선택안함')
+        if main != '선택안함' and main in wd_to_idx:
+            d_idx = wd_to_idx[main]
+            for w in range(st.session_state.week_count):
+                ds = (st.session_state.base_date + timedelta(days=w*7+d_idx)).strftime("%m-%d")
+                if ds in daily and daily[ds]['오전'] is None: daily[ds]['오전'] = '메인외래'
+                if ds in daily and daily[ds]['오후'] is None: daily[ds]['오후'] = '메인외래'
+        # 학생실습
+        for sp in st.session_state.student_practices:
+            if sp['이름'] == name and sp['날짜'] in daily and daily[sp['날짜']][sp['시간']] is None:
+                daily[sp['날짜']][sp['시간']] = '학생실습'
+        # 연보 (forced_assignments)
+        for (fname, fdate, ftime), flabel in forced_assignments.items():
+            if fname == name and fdate in daily and daily[fdate][ftime] is None:
+                daily[fdate][ftime] = flabel
+        # 영상 파견
+        for rd in rad_days_d.get(name, []):
+            if rd in wd_to_idx:
+                d_idx = wd_to_idx[rd]
+                for w in range(st.session_state.week_count):
+                    ds = (st.session_state.base_date + timedelta(days=w*7+d_idx)).strftime("%m-%d")
+                    if ds in daily:
+                        if daily[ds]['오전'] is None: daily[ds]['오전'] = '영상'
+                        if daily[ds]['오후'] is None: daily[ds]['오후'] = '영상'
+        # 배정 결과
+        for tid, assignee in assignments.items():
+            if assignee != name: continue
+            tr = cur_df[cur_df['task_id'] == tid]
+            if tr.empty: continue
+            row = tr.iloc[0]; ds, ttime = row['date'], row['time']
+            if ds in daily and daily[ds].get(ttime) is None:
+                daily[ds][ttime] = tid
+        res_slots[name] = {'daily_slots': daily}
+    return res_slots
+
+# 백업 로드 직후: assignments 기준으로 res_daily_slots 재구성 (개인별/주차별 뷰 동기화)
+if st.session_state.pop('_needs_slot_rebuild', False):
+    st.session_state.res_daily_slots = build_res_daily_slots(
+        st.session_state.assignments,
+        st.session_state.get('cpsat_forced_assignments', {})
+    )
+
 st.markdown("<div style='font-size: 1.1rem; font-weight: 600; margin-bottom: 15px; color: #555555; text-align: left;'>👨‍💻 Made by 45기 변준혁 문의 T. 010-4937-1111</div>", unsafe_allow_html=True)
 
 # --- 메인 탭 (순서 변경: 사용법이 가장 왼쪽) ---
@@ -479,6 +597,8 @@ with tabs[6]:
                 supplementary_schedules=st.session_state.supplementary_schedules,
                 rad_days=rad_days_for_diag,
                 student_practices=st.session_state.student_practices,
+                bogeonso_substitutes=st.session_state.bogeonso_substitutes,
+                loading_ranges=st.session_state.loading_ranges,
             )
             if diagnosis_result['status'] == "적합":
                 st.markdown(f"<div style='padding:10px; background:#E8F8F5; border-left:4px solid #1abc9c; border-radius:3px;'>{diagnosis_result['message']}</div>", unsafe_allow_html=True)
@@ -510,6 +630,61 @@ with tabs[6]:
             index=mult_options.index(current),
             help="'자동'이면 시스템이 사전 진단으로 산출. 직접 지정하면 그 배율로 풀이."
         )
+    set_col1, set_col2 = st.columns(2)
+    with set_col1:
+        st.session_state.cpsat_max_broken_pairs = st.number_input(
+            "깨도 되는 pairing 최대 개수", min_value=0, max_value=50,
+            value=st.session_state.cpsat_max_broken_pairs, step=1,
+            help="이 개수까지 차리/판정+참관 묶음을 분리 허용. (건증·박진호 묶음은 항상 보호되어 이 한도와 무관하게 안 깨짐)"
+        )
+    with set_col2:
+        st.session_state.cpsat_extra_shift = st.number_input(
+            "차리/판정 추가 -1 이동 허용 개수", min_value=0, max_value=100,
+            value=st.session_state.cpsat_extra_shift, step=1,
+            help="슬롯 부족 날짜는 자동으로 -1 이동이 허용됩니다. 그 외에도 이 개수만큼 차리/판정을 직전 평일로 이동 허용 (빡빡해서 해가 없을 때 늘려보세요)."
+        )
+
+    # === 로딩 범위 / 부등호(H17) 설정 ===
+    with st.expander("⚖️ 로딩 범위 / 그룹 부등호 설정 (고급)", expanded=False):
+        st.caption("그룹별 로딩 범위와 인접 그룹 간 부등호를 조정해 CP-SAT를 가동합니다. 기본값은 현재 설정값입니다.")
+        if st.button("↩️ 기본값으로 초기화", key="reset_loading_cfg"):
+            st.session_state.loading_ranges = {0: [4.9, 5.5], 1: [6.3, 6.8], 2: [6.5, 7.2], 3: [7.3, 7.9], 4: [8.0, 9.0]}
+            st.session_state.h17_ops = {0: "<", 1: "<", 2: "<", 3: "<"}
+            for _g in range(5):
+                st.session_state.pop(f"lr_lo_{_g}", None)
+                st.session_state.pop(f"lr_hi_{_g}", None)
+                st.session_state.pop(f"h17_op_{_g}", None)
+            st.rerun()
+        group_labels = {
+            0: "그룹0 · 의국/교육수석 (R3)",
+            1: "그룹1 · 학생/진료수석 (R3)",
+            2: "그룹2 · 일반 R3",
+            3: "그룹3 · R2",
+            4: "그룹4 · R1/R0",
+        }
+        op_options = ["<", "<=", "="]
+        op_help = "'<' 위 그룹 로딩이 더 큼(엄격) · '<=' 같거나 더 큼 · '=' 두 그룹을 한 그룹으로 병합(로딩 동일 취급)"
+        new_ranges = {}
+        for g in range(5):
+            lo_cur, hi_cur = st.session_state.loading_ranges[g]
+            rc1, rc2, rc3 = st.columns([2, 1, 1])
+            rc1.markdown(f"**{group_labels[g]}**")
+            lo_new = rc2.number_input("하한", min_value=0.0, max_value=10.0, value=float(lo_cur), step=0.1, key=f"lr_lo_{g}", format="%.1f")
+            hi_new = rc3.number_input("상한", min_value=0.0, max_value=10.0, value=float(hi_cur), step=0.1, key=f"lr_hi_{g}", format="%.1f")
+            new_ranges[g] = [lo_new, hi_new]
+            if g < 4:
+                op_cur = st.session_state.h17_ops.get(g, "<")
+                idx = op_options.index(op_cur) if op_cur in op_options else 0
+                st.session_state.h17_ops[g] = st.selectbox(
+                    f"↕ 그룹{g} 와 그룹{g+1} 관계", options=op_options, index=idx,
+                    key=f"h17_op_{g}", help=op_help,
+                )
+        st.session_state.loading_ranges = new_ranges
+        # 유효성 경고
+        for g in range(5):
+            lo_v, hi_v = st.session_state.loading_ranges[g]
+            if lo_v > hi_v:
+                st.warning(f"{group_labels[g]}: 하한({lo_v})이 상한({hi_v})보다 큽니다 — 해가 없을 수 있습니다.")
 
     if st.button("🚀 자동 스케줄 랜덤 생성 (플랜 B 포함)", use_container_width=True, type="primary"):
         if not st.session_state.residents: st.error("전공의 명단을 등록해주세요.")
@@ -547,6 +722,10 @@ with tabs[6]:
                         pain_applicants=st.session_state.pain_applicants,
                         time_limit_sec=st.session_state.cpsat_time_limit,
                         manual_multiplier=manual_mult,
+                        loading_ranges=st.session_state.loading_ranges,
+                        h17_ops=st.session_state.h17_ops,
+                        max_broken_pairs=st.session_state.cpsat_max_broken_pairs,
+                        extra_shift_allowance=st.session_state.cpsat_extra_shift,
                     )
 
                 if cpsat_result['status'] in ['OPTIMAL', 'FEASIBLE']:
@@ -575,85 +754,13 @@ with tabs[6]:
                         except Exception:
                             pass
 
-                    # 보건소 슬롯 표시 (CP-SAT은 일반 task만 다룸, 연건 슬롯은 별도)
-                    # 보건소 담당자에게 매주 연보 슬롯 추가 표시는 res_daily_slots에서 처리
-                    res_daily_slots = {}
-                    weekday_to_idx = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4}
-                    for r in st.session_state.residents:
-                        name = r['이름']
-                        roles = r.get('역할', [])
-                        # daily_slots 초기화
-                        daily = {}
-                        for w in range(st.session_state.week_count):
-                            for d_idx in range(5):
-                                from datetime import timedelta
-                                dt = st.session_state.base_date + timedelta(days=w*7+d_idx)
-                                ds = dt.strftime("%m-%d")
-                                daily[ds] = {'오전': None, '오후': None}
-
-                        # 공휴일 (가장 우선)
-                        for ds in daily:
-                            if ds in u_holidays:
-                                daily[ds]['오전'] = '공휴일'
-                                daily[ds]['오후'] = '공휴일'
-
-                        # 휴가 (사전휴가/직전휴가/Off 등 — 종류 그대로) - 공휴일 다음 우선
-                        for l in st.session_state.resident_leaves:
-                            if l['이름'] == name and l['날짜'] in daily:
-                                # 공휴일이 아니면 휴가로 표시 (양쪽 모두)
-                                if daily[l['날짜']]['오전'] != '공휴일':
-                                    daily[l['날짜']]['오전'] = l['종류']
-                                if daily[l['날짜']]['오후'] != '공휴일':
-                                    daily[l['날짜']]['오후'] = l['종류']
-
-                        # 메인외래 (R3 한정, 휴가/공휴일 제외)
-                        main = r.get('메인외래', '선택안함')
-                        if main != '선택안함' and main in weekday_to_idx:
-                            d_idx = weekday_to_idx[main]
-                            for w in range(st.session_state.week_count):
-                                dt = st.session_state.base_date + timedelta(days=w*7+d_idx)
-                                ds = dt.strftime("%m-%d")
-                                if ds in daily and daily[ds]['오전'] is None:
-                                    daily[ds]['오전'] = '메인외래'
-                                if ds in daily and daily[ds]['오후'] is None:
-                                    daily[ds]['오후'] = '메인외래'
-
-                        # 학생실습 (휴가/공휴일/메인외래 제외)
-                        for sp in st.session_state.student_practices:
-                            if sp['이름'] == name and sp['날짜'] in daily:
-                                if daily[sp['날짜']][sp['시간']] is None:
-                                    daily[sp['날짜']][sp['시간']] = '학생실습'
-
-                        # 보건소 + 대체자 연보 (CP-SAT의 forced_assignments에서 일괄 처리)
-                        # forced_assignments: {(person, date, time): '연보(오전)' or '연보(오후)'}
-                        for (fname, fdate, ftime), flabel in cpsat_result.get('forced_assignments', {}).items():
-                            if fname != name: continue
-                            if fdate in daily and daily[fdate][ftime] is None:
-                                daily[fdate][ftime] = flabel
-
-                        # 영상 파견
-                        for rd in rad_days_dict.get(name, []):
-                            if rd in weekday_to_idx:
-                                d_idx = weekday_to_idx[rd]
-                                for w in range(st.session_state.week_count):
-                                    dt = st.session_state.base_date + timedelta(days=w*7+d_idx)
-                                    ds = dt.strftime("%m-%d")
-                                    if ds in daily:
-                                        if daily[ds]['오전'] is None: daily[ds]['오전'] = '영상'
-                                        if daily[ds]['오후'] is None: daily[ds]['오후'] = '영상'
-
-                        # CP-SAT 배정 결과 반영
-                        for tid, assignee in cpsat_result['assignments'].items():
-                            if assignee != name: continue
-                            task_row = df_gen[df_gen['task_id'] == tid]
-                            if task_row.empty: continue
-                            tr = task_row.iloc[0]
-                            ds, ttime = tr['date'], tr['time']
-                            if ds in daily and daily[ds].get(ttime) is None:
-                                daily[ds][ttime] = tid
-                        # 중요: 기존 코드는 res_daily_slots[name]['daily_slots'] 구조 사용
-                        # generate_excel_data, 전공의 개인별 탭 등이 이 구조로 접근하므로 동일하게 맞춤
-                        res_daily_slots[name] = {'daily_slots': daily}
+                    # 전공의별 daily_slots 구성 (공휴일/휴가/메인외래/학생실습/연보/영상 + 배정 결과)
+                    # 수동 저장 시에도 동일 함수로 재구성하여 개인별/주차별 뷰가 항상 일치하도록 함
+                    res_daily_slots = build_res_daily_slots(
+                        cpsat_result['assignments'],
+                        cpsat_result.get('forced_assignments', {}),
+                        df=df_gen
+                    )
 
                     # 리포트 생성
                     report = ["✅ **CP-SAT 배정 리포트**"]
@@ -744,6 +851,8 @@ with tabs[6]:
                     st.session_state.assignments = cpsat_result['assignments']
                     st.session_state.alloc_report = "\n".join(report)
                     st.session_state.res_daily_slots = res_daily_slots
+                    # 수동 저장 시 daily_slots 재구성에 재사용하기 위해 연보(forced) 정보 보관
+                    st.session_state.cpsat_forced_assignments = cpsat_result.get('forced_assignments', {})
                     # 디버깅용 - 백업에 포함시키기 위해 session_state에 저장
                     st.session_state.cpsat_task_time_overrides = cpsat_result.get('task_time_overrides', {})
                     st.session_state.cpsat_task_date_overrides = cpsat_result.get('task_date_overrides', {})
@@ -785,6 +894,9 @@ with tabs[6]:
                         'student_practices': st.session_state.student_practices,
                         'pain_applicants': st.session_state.pain_applicants,
                         'auto_mult': cpsat_result.get('multiplier_used', 1.0),
+                        'loading_ranges': st.session_state.loading_ranges,
+                        'h17_ops': st.session_state.h17_ops,
+                        'max_broken_pairs': st.session_state.cpsat_max_broken_pairs,
                     }
 
             else:
@@ -838,6 +950,9 @@ with tabs[6]:
                             target_mult_multiplier=ii['auto_mult'],
                             per_solve_time=diag_per_solve,
                             enable_drop_two=enable_drop_two,
+                            loading_ranges=ii.get('loading_ranges'),
+                            h17_ops=ii.get('h17_ops'),
+                            max_broken_pairs=ii.get('max_broken_pairs', 5),
                         )
                         st.session_state.last_diagnosis = diag
                     except Exception as e:
@@ -878,7 +993,14 @@ with tabs[6]:
     res_choices = [""] + [r["이름"] for r in st.session_state.residents]
     edited_assign = st.data_editor(assign_df[['week', 'date', 'day', 'time', 'prof', 'task', '배정된_전공의', 'task_id']], column_config={"task_id": None, "배정된_전공의": st.column_config.SelectboxColumn("배정", options=res_choices)}, use_container_width=True, hide_index=True, height=500)
     if st.button("💾 수동 배정 저장", use_container_width=True):
-        st.session_state.assignments = {row['task_id']: row['배정된_전공의'] for _, row in edited_assign.iterrows() if row['배정된_전공의']}; st.success("저장 완료!")
+        st.session_state.assignments = {row['task_id']: row['배정된_전공의'] for _, row in edited_assign.iterrows() if row['배정된_전공의']}
+        # 개인별/주차별 현황 뷰가 읽는 res_daily_slots를 새 배정으로 재구성 (불일치 방지)
+        st.session_state.res_daily_slots = build_res_daily_slots(
+            st.session_state.assignments,
+            st.session_state.get('cpsat_forced_assignments', {})
+        )
+        st.success("저장 완료!")
+        st.rerun()
 
 # 탭 인덱스 7 (기존 6): 전공의 개인별
 with tabs[7]:
@@ -1073,6 +1195,7 @@ with tabs[9]:
                 task_time_overrides=st.session_state.get("cpsat_task_time_overrides", {}),
                 shifted_tasks=st.session_state.get("cpsat_shifted_tasks", []),
                 original_df_dates=st.session_state.get("cpsat_original_df_dates", {}),
+                master_schedules=st.session_state.master_schedules,
             )
 
             # 전체 요약

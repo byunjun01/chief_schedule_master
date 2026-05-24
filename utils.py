@@ -98,7 +98,7 @@ def get_prep_dt(target_date, prof, t_name, clinic, orig_day, holidays):
     elif prof in ["조비룡", "박민선"]:
         if prof == "조비룡" and "판정" in t_name and orig_day == "화": shift = 2
         elif prof == "박민선" and "판정" in t_name and "건증" in clinic and orig_day == "수": shift = 2
-        elif prof == "박민선" and "클리닉" in clinic and orig_day == "월": shift = 2  # 클리닉 판정/차리 (월→직전주 목)
+        elif prof == "박민선" and "클리닉" in clinic and orig_day == "월": shift = 2  # 클리닉 차리/판정 (월→직전주 목)
         else: shift = 1
     elif prof == "조우현": shift = 3
     elif prof == "전혜령": shift = 3 if "판정" in t_name else 2
@@ -156,7 +156,7 @@ def generate_schedule(start_date, total_weeks, holidays, master_df, off_slots, s
                         p_week = (prep_dt - start_date).days // 7 + 1
                         f_time = forced_time if forced_time else time
                         t_suffix = "판정" if (is_hc or is_cl) else "차리"
-                        if prof in ["조비룡", "박민선"] and is_cl: t_suffix = "판정/차리"
+                        if prof in ["조비룡", "박민선"] and is_cl: t_suffix = "차리/판정"
                         if prof == "박진호" and "통증클리닉" in clinic: t_suffix = "차리"
                         if prof == "조수환" and "암외래" in clinic:
                             day_info = f"({d_name})" if d_name == "화" else f"({d_name} {time})"
@@ -213,7 +213,7 @@ def generate_schedule(start_date, total_weeks, holidays, master_df, off_slots, s
                                 p_week = (prep_dt - start_date).days // 7 + 1
                                 f_time = forced_time if forced_time else time
                                 t_suffix = "판정" if (is_hc or is_cl) else "차리"
-                                if prof in ["조비룡", "박민선"] and is_cl: t_suffix = "판정/차리"
+                                if prof in ["조비룡", "박민선"] and is_cl: t_suffix = "차리/판정"
                                 if prof == "박진호" and "통증클리닉" in clinic: t_suffix = "차리"
                                 if prof == "조수환" and "암외래" in clinic:
                                     day_info = f"({day})" if day == "화" else f"({day} {time})"
@@ -278,7 +278,7 @@ def get_resident_target_mult(resident):
     else: return 8.5  # R0
 
 
-def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays, off_slots, master_schedules_df, supplementary_schedules=None, rad_days=None, student_practices=None):
+def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays, off_slots, master_schedules_df, supplementary_schedules=None, rad_days=None, student_practices=None, bogeonso_substitutes=None, loading_ranges=None):
     """
     사전 진단: 일반 배정 가능한 슬롯 수 vs 배정해야 할 task 수를 비교하여
     사용자 지정 target_mult로 배정 가능한지 판단하고, 필요한 경우 자동 상향 배수를 계산.
@@ -344,24 +344,62 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
         general_slots += avail
 
     # === 2) 일반 배정 task 수 계산 ===
-    # generate_schedule 결과에서 영상/보건소 task와 영상 파견자 클리닉 판정/차리 task를 제외
+    # generate_schedule 결과에서 영상/보건소 task와 영상 파견자 클리닉 차리/판정 task를 제외
     df_all = generate_schedule(start_date, week_count, holidays, master_schedules_df, off_slots, supplementary_schedules=supplementary_schedules)
 
-    # 영상 파견자가 받을 클리닉 판정/차리 수 추정 = 영상 파견자 수 × week_count
+    # 영상 파견자가 받을 클리닉 차리/판정 수 추정 = 영상 파견자 수 × week_count
     # (각 영상 파견자가 주당 1개 받음)
     rad_resident_count = sum(1 for r in residents if "본원 영상" in r.get('역할', []) and rad_days.get(r['이름']))
     estimated_rad_clinic_tasks = rad_resident_count * week_count
 
-    # 전체 task 수에서 영상 파견자가 가져갈 task 수만큼 제외
+    # 전체 task 수에서 영상 파견자가 가져갈 task 수만큼 제외 (일반 풀 로딩 비율 계산용)
     general_tasks = len(df_all) - estimated_rad_clinic_tasks
     # 추가로 일반 task는 모두 일반 전공의 풀에서 처리하므로 그대로 사용
     # (보건소 task는 daily_slots에 직접 들어가는 거라 df_all에 없음)
 
-    # === 3) 사용자 지정 단순 평균 target_mult ===
+    # === 배정 필요한 전체 task 수 (표시용) ===
+    # = 일반 생성 task(len(df_all)) + forced 슬롯(연보/메인외래/학생실습/영상)
+    # forced_assignments는 공휴일/휴가와 겹치면 휴가/공휴일을 우선해 제외한 결과 (build_problem_data에서 처리)
+    # task로 세지 않는 것: 사전휴가/직전휴가/공휴일/Off
+    try:
+        from cpsat_solver import build_problem_data as _bpd
+        _pdata = _bpd(df_all, residents, leaves, week_count, start_date, holidays,
+                      bogeonso_substitutes=bogeonso_substitutes, rad_days=rad_days,
+                      student_practices=student_practices)
+        forced_total = len(_pdata.get('forced_assignments', {}))
+    except Exception:
+        forced_total = 0
+    total_general_df_tasks = len(df_all)
+    total_tasks_needed = total_general_df_tasks + forced_total
+
+    # === 3) 지정 로딩 = 각 일반 전공의의 그룹 로딩범위 중앙값 평균 (loading_ranges 반영) ===
+    # loading_ranges를 바꾸면 지정 로딩도 함께 변하도록 범위 중앙값에서 산출
+    try:
+        from cpsat_solver import LOADING_RANGES as _DEFAULT_LR
+    except Exception:
+        _DEFAULT_LR = {0: (4.9, 5.5), 1: (6.3, 6.8), 2: (6.5, 7.2), 3: (7.3, 7.9), 4: (8.0, 9.0)}
+    _lr = {g: tuple(loading_ranges[g]) for g in range(5)} if loading_ranges else dict(_DEFAULT_LR)
+
+    def _loading_group(r):
+        """0:의국/교육수석 1:학생/진료수석 2:일반R3 3:R2 4:R1/R0 (보건소/영상은 general_residents에서 이미 제외)"""
+        roles = r.get('역할', [])
+        yr = r['연차']
+        if yr == "R3":
+            if "의국수석" in roles or "교육수석" in roles: return 0
+            if "학생수석" in roles or "진료수석" in roles: return 1
+            return 2
+        if yr == "R2": return 3
+        return 4  # R1/R0
+
     if not general_residents:
         ideal_avg = 7.0  # 기본값
     else:
-        ideal_avg = sum(get_resident_target_mult(r) for r in general_residents) / len(general_residents)
+        mids = []
+        for r in general_residents:
+            g = _loading_group(r)
+            lo, hi = _lr.get(g, (7.0, 7.0))
+            mids.append((lo + hi) / 2.0)
+        ideal_avg = sum(mids) / len(mids)
 
     # === 4) 실제 필요 평균 로딩 ===
     required_avg = (general_tasks * 10) / general_slots if general_slots > 0 else 0
@@ -382,14 +420,17 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
         status = "부족"
 
     if status == "적합":
-        message = f"✅ 적합 — task {general_tasks}개 / 슬롯 {general_slots}개 (필요 평균 로딩 {required_avg:.2f}, 사용자 지정 평균 {ideal_avg:.2f})"
+        message = f"✅ 적합 — 배정 필요 task 총 {total_tasks_needed}개 (일반 {total_general_df_tasks} + 연보/메인/학생/영상 {forced_total}) | 일반 풀 필요 로딩 {required_avg:.2f} ≤ 지정 {ideal_avg:.2f}"
     else:
-        message = f"🔴 부족 — task {general_tasks}개 / 슬롯 {general_slots}개 (필요 평균 로딩 {required_avg:.2f} > 사용자 지정 평균 {ideal_avg:.2f}). 자동 {multiplier:.2f}배 상향 적용"
+        message = f"🔴 부족 — 배정 필요 task 총 {total_tasks_needed}개 (일반 {total_general_df_tasks} + 연보/메인/학생/영상 {forced_total}) | 일반 풀 필요 로딩 {required_avg:.2f} > 지정 {ideal_avg:.2f}, 자동 {multiplier:.2f}배 상향"
 
     return {
         "status": status,
         "general_slots": general_slots,
         "general_tasks": general_tasks,
+        "total_tasks_needed": total_tasks_needed,   # 배정 필요한 전체 work (일반+연보+메인+학생+영상)
+        "total_general_df_tasks": total_general_df_tasks,
+        "forced_total": forced_total,
         "ideal_avg_target_mult": ideal_avg,
         "required_avg_loading": required_avg,
         "multiplier": multiplier,
@@ -405,7 +446,7 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
     rad_days: dict { "전공의이름": ["월","수",...] }
         - 본원 영상 역할이 있는 전공의의 영상의학과 파견 요일 목록
         - 지정된 요일은 오전+오후 모두 "영상"으로 고정 배치
-        - 영상 파견자는 그 외 task를 일절 받지 않음 (단, 조비룡/박민선 클리닉 판정/차리를 주 1개 받음, 조비룡 우선)
+        - 영상 파견자는 그 외 task를 일절 받지 않음 (단, 조비룡/박민선 클리닉 차리/판정를 주 1개 받음, 조비룡 우선)
     target_mult_multiplier: float (default 1.0)
         - 사전 진단에서 계산된 상향 배수. 모든 사람의 target_mult에 곱해짐.
         - 1.05, 1.10, 1.15, ... 로딩이 부족할 때 비율 유지하며 자동 상향
@@ -528,7 +569,7 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
     # === [신규] 본원 영상 파견자 처리 ===
     # 영상 파견 요일이 "지정된" 사람만 특별 처리:
     # 1) 지정된 파견 요일은 오전+오후 모두 "영상"으로 고정 (휴가 우선)
-    # 2) 조비룡/박민선 클리닉 판정/차리 묶음을 주 1개 배정 (조비룡 우선)
+    # 2) 조비룡/박민선 클리닉 차리/판정 묶음을 주 1개 배정 (조비룡 우선)
     # 영상 파견 요일 미지정자는 일반 R3로 동작 (아래 valid_names에 포함)
     rad_report_lines = []
     rad_names = [n for n, d in res_data.items() if d["is_rad"] and rad_days.get(n)]  # 요일 지정된 사람만
@@ -553,17 +594,17 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
                     res_data[rad_name]['assigned_count'] += 1
         rad_report_lines.append(f"  ✓ **{rad_name}**: 매주 {'/'.join(days)} 영상 파견 배정")
 
-    # 2) 클리닉 판정/차리 묶음 주 1개 배정 (조비룡 우선)
+    # 2) 클리닉 차리/판정 묶음 주 1개 배정 (조비룡 우선)
     if rad_names:
         # 주차별로 묶음 task 모으기 (조비룡 클리닉 / 박민선 클리닉)
         # pair_id 기준으로 묶음 단위 식별
-        # 조비룡 클리닉 판정/차리 (목): 진료가 목, task는 수요일에 1개 묶음(차리+판정 같은 셀에 통합)
-        # 박민선 클리닉 판정/차리 (월): 진료가 월, task는 직전주 목요일에 1개 묶음
+        # 조비룡 클리닉 차리/판정 (목): 진료가 목, task는 수요일에 1개 묶음(차리+판정 같은 셀에 통합)
+        # 박민선 클리닉 차리/판정 (월): 진료가 월, task는 직전주 목요일에 1개 묶음
         # 실제 df_all에서 pair_id가 있는 것 = 묶음 task
         clinic_groups_per_week = {}  # {week: [(priority, gid, [(idx,row),...]), ...]}
         for idx, row in out_df.iterrows():
             t = row['task']
-            if "클리닉 판정/차리" not in t:
+            if "클리닉 차리/판정" not in t:
                 continue
             if "조비룡" in t:
                 prio = 0  # 조비룡 우선 (작은 수가 먼저)
@@ -607,7 +648,7 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
                             res_data[rad_name]['assigned_count'] += 1
                         rad_received_this_week.add(rad_name)
                         task_label = "조비룡 클리닉" if ginfo["prio"] == 0 else "박민선 클리닉"
-                        rad_report_lines.append(f"  ✓ **{rad_name}** 주{w}: {task_label} 판정/차리 배정")
+                        rad_report_lines.append(f"  ✓ **{rad_name}** 주{w}: {task_label} 차리/판정 배정")
                         break
 
     valid_names = [n for n, d in res_data.items() if not d["is_bogeonso"] and not (d["is_rad"] and rad_days.get(n))]
@@ -669,7 +710,7 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
                 has_chari = True
             elif "참관" in t:
                 has_observation = True
-        # 판정이 들어간 묶음은 분리 안 함 (건증 판정 + 판정 참관, 클리닉 판정/차리 등)
+        # 판정이 들어간 묶음은 분리 안 함 (건증 판정 + 판정 참관, 클리닉 차리/판정 등)
         if has_panjung: return False
         # 차리 + 참관 묶음만 분리 가능
         return has_chari and has_observation
@@ -701,8 +742,8 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
             if (any(p in t for p in ["조비룡", "박민선"]) and any(kw in t for kw in ["외래 참관", "차리"])): is_r3_abs = True
             if "처치" in t: is_tx = True
             if "판정" in t and "참관" not in t: is_panjung = True
-            # 조비룡/박민선 클리닉 판정/차리 묶음 식별 (R3 판정 quota에서 제외 + R3에게 페널티)
-            if (any(p in t for p in ["조비룡", "박민선"]) and "클리닉" in t and "판정/차리" in t):
+            # 조비룡/박민선 클리닉 차리/판정 묶음 식별 (R3 판정 quota에서 제외 + R3에게 페널티)
+            if (any(p in t for p in ["조비룡", "박민선"]) and "클리닉" in t and "차리/판정" in t):
                 is_clinic_panjung = True
             if is_fixed(t): has_fixed = True
         # 우선순위 재설계 (사용자 의도):
@@ -737,7 +778,7 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
         if info.get('is_panjung', False):
             pq, yr = res_data[n]['panjung_quota'], res_data[n]['year']
             if yr == "R3":
-                # 클리닉 판정/차리는 R3에게 우선순위 낮춤 (다른 일반 판정을 받게 유도)
+                # 클리닉 차리/판정는 R3에게 우선순위 낮춤 (다른 일반 판정을 받게 유도)
                 if info.get('is_clinic_panjung', False):
                     bonus = -3000  # 받을 수는 있지만 일반 판정보다 우선순위 낮음
                 else:
@@ -841,9 +882,9 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
                     res_data[n]['assigned_count'] += 1
                     # 판정 quota 카운트:
                     # - "판정" 포함 & "참관" 없음 (= 판정 task)
-                    # - 단, R3의 경우 클리닉 판정/차리는 판정 quota에 카운트하지 않음 (별도로 일반 판정을 받아야 함)
+                    # - 단, R3의 경우 클리닉 차리/판정는 판정 quota에 카운트하지 않음 (별도로 일반 판정을 받아야 함)
                     if "판정" in row['task'] and "참관" not in row['task']:
-                        is_clinic_pj = (any(p in row['task'] for p in ["조비룡", "박민선"]) and "클리닉" in row['task'] and "판정/차리" in row['task'])
+                        is_clinic_pj = (any(p in row['task'] for p in ["조비룡", "박민선"]) and "클리닉" in row['task'] and "차리/판정" in row['task'])
                         if not (res_data[n]['year'] == "R3" and is_clinic_pj):
                             res_data[n]['panjung_quota'] += 1
                             # 주차별 판정 카운트도 같이 증가
@@ -860,7 +901,7 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
         elif info['is_tx']: cands = [n for n in valid_names if not res_data[n]['is_rookie']]
         else: cands = valid_names[:]
         # === 판정 hard 제외 ===
-        # 1) R3 판정 1개 도달 시 후보에서 완전 제외 (클리닉 판정/차리 제외) [hard 유지]
+        # 1) R3 판정 1개 도달 시 후보에서 완전 제외 (클리닉 차리/판정 제외) [hard 유지]
         # 2) R1/R0 주당 최대 3개 hard [신규]
         # 3) R2 주당 최대 2개 hard [신규]
         # (R2 max ≤ R1/R0 min은 hard 제거 → soft로 변경, 라운드 평가 기준으로 사용)

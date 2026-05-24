@@ -84,8 +84,8 @@ EXPECTED_SCHEDULE = {
         # 격주 - 조우현(홀)/김계형(짝) (※ 정답지는 task 생성 주차 기준 - 판정 참관은 진료 당일)
         {"name": "Pf. 조우현 판정 참관 (오후)", "cycle": "홀수주"},
         {"name": "Pf. 김계형 판정 참관 (오후)", "cycle": "짝수주"},
-        # 클리닉 판정/차리
-        {"name": "Pf. 조비룡 클리닉 판정/차리 (목)", "cycle": "매주"},
+        # 클리닉 차리/판정
+        {"name": "Pf. 조비룡 클리닉 차리/판정 (목)", "cycle": "매주"},
         # 건증 판정
         {"name": "Pf. 윤재문 건증 판정 (금)", "cycle": "매주"},
         {"name": "Pf. 황서은 건증 판정 (금)", "cycle": "매주"},
@@ -114,8 +114,8 @@ EXPECTED_SCHEDULE = {
         {"name": "Pf. 윤재문 판정 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 고아령 판정 참관 (오후)", "cycle": "매주"},
         {"name": "Pf. 전혜령 판정 참관 (오후)", "cycle": "홀수주"},  # 격주
-        # 클리닉 판정/차리
-        {"name": "Pf. 박민선 클리닉 판정/차리 (월)", "cycle": "매주"},
+        # 클리닉 차리/판정
+        {"name": "Pf. 박민선 클리닉 차리/판정 (월)", "cycle": "매주"},
         # 건증 판정
         {"name": "Pf. 박진호 건증 판정 (수)", "cycle": "매주"},
         {"name": "Pf. 조수환 건증 판정 (월)", "cycle": "매주"},
@@ -268,7 +268,8 @@ def _check_exclusion_reason(item, day_date_str, day_name, holidays, off_slots, t
 def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
                     supplementary_schedules=None, assignments=None,
                     task_date_overrides=None, task_time_overrides=None,
-                    shifted_tasks=None, original_df_dates=None):
+                    shifted_tasks=None, original_df_dates=None,
+                    master_schedules=None):
     """
     실제 생성된 df_all을 정답지와 비교 + 미배정 task 탐지.
     
@@ -391,6 +392,40 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
                     'reason': f'공휴일로 인해 원래 {expected_prev_day}요일에서 {cur_day}요일로 이동',
                 }
 
+    # ===== 규칙 설정(master_schedules) 변경 반영 (공휴일/휴진보다 우선 확인) =====
+    # 현재 규칙과 기본 규칙(RAW_SCHEDULES_INITIAL)으로 각각 스케줄을 생성(공휴일/휴진/보충 제외)하여
+    # 사용자가 '규칙 설정' 탭에서 추가/제외한 진료를 (주차,요일)별 task 이름 차이로 식별.
+    #   removed_by_wd[(week, day)]: 기본엔 있었으나 현재 규칙에서 빠진 task (정규화 이름) → '규칙설정 제외'
+    #   added_by_wd[(week, day)]  : 기본엔 없었으나 현재 규칙에서 추가된 task          → '규칙설정 추가'
+    removed_by_wd = {}
+    added_by_wd = {}
+    if master_schedules is not None:
+        try:
+            import pandas as _pd
+            from utils import generate_schedule as _gen, RAW_SCHEDULES_INITIAL as _RAW
+            _cols = ["교수명", "요일", "시간", "진료명", "주기", "차리생성", "참관생성", "태그"]
+            _base_master = _pd.DataFrame(_RAW, columns=_cols)
+            _cur_df = _gen(base_date, week_count, [], master_schedules, [], supplementary_schedules=[])
+            _base_df = _gen(base_date, week_count, [], _base_master, [], supplementary_schedules=[])
+
+            def _names_by_wd(_df):
+                d = {}
+                if _df is None or _df.empty:
+                    return d
+                for _, rr in _df.iterrows():
+                    d.setdefault((rr["week"], rr["day"]), set()).add(_normalize(rr["task"]))
+                return d
+            _cur_names = _names_by_wd(_cur_df)
+            _base_names = _names_by_wd(_base_df)
+            for key in (set(_cur_names) | set(_base_names)):
+                cur_s = _cur_names.get(key, set())
+                base_s = _base_names.get(key, set())
+                removed_by_wd[key] = base_s - cur_s
+                added_by_wd[key] = cur_s - base_s
+        except Exception:
+            removed_by_wd = {}
+            added_by_wd = {}
+
     for week in range(1, week_count + 1):
         result[week] = {}
         for d_idx, day_name in enumerate(weekday_names):
@@ -447,6 +482,10 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
                     # 이미 이동된 task로 추적된 경우 skip
                     if norm in moved_out_norms:
                         continue
+                    # (1순위) 규칙설정에서 제외된 진료인지 먼저 확인 — 공휴일/휴진보다 우선
+                    if norm in removed_by_wd.get((week, day_name), set()):
+                        missing.append({"name": item["name"], "reason": "규칙 설정에서 제외된 진료"})
+                        continue
                     reason = _check_exclusion_reason(item, day_date_str, day_name, holidays, off_slots, item["name"])
                     missing.append({"name": item["name"], "reason": reason})
 
@@ -457,7 +496,10 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
                     # 이미 이동된 task로 추적된 경우 skip
                     if norm in moved_in_task_names:
                         continue
-                    if (week, day_name, original) in sup_task_names:
+                    # (1순위) 규칙설정에서 추가된 진료인지 먼저 확인
+                    if norm in added_by_wd.get((week, day_name), set()):
+                        extra.append({"name": original, "reason": "규칙 설정에서 추가된 진료"})
+                    elif (week, day_name, original) in sup_task_names:
                         extra.append({"name": original, "reason": "보충진료 추가에 의한 task"})
                     else:
                         extra.append({"name": original, "reason": None})
