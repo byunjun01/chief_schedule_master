@@ -1038,7 +1038,7 @@ class CPSATScheduleSolver:
             pname = p['name']
             avail = self.person_avail_sessions[pname]
             lo_load, hi_load = cluster_range[cluster_of[p['group']]]
-            lo_load *= MULT
+            # 배율(MULT)은 '최대값'만 키움 — 최소값은 그대로 두어 범위를 위로만 확장
             hi_load *= MULT
             # 하한은 올림(ceil)해야 loading >= lo_load 보장
             count_lo = math.ceil(lo_load * avail / 10)
@@ -1720,15 +1720,15 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
             if "차리" in tn or "판정" in tn:
                 shortage_shift_tids.add(t['task_id'])
 
-    # 추가 -1 이동 허용(extra_shift_allowance>0): 부족이 아니어도 차리/판정 전체를 이동 후보로 등록
-    # (실제 추가 이동 수는 솔버에서 extra_shift_allowance개까지로 캡)
+    # 추가 -1 이동 허용(extra_shift_allowance>0): 부족이 아니어도 '차리만' 이동 후보로 등록
+    # (판정은 제외 — 클리닉 차리/판정도 '판정' 포함이라 제외됨. 실제 추가 이동 수는 솔버에서 캡)
     shift_allowed_tids = set(shortage_shift_tids)
     if extra_shift_allowance and extra_shift_allowance > 0:
         for t in pdata_temp['tasks']:
             tn = t['task']
             if "참관" in tn:
                 continue
-            if "차리" in tn or "판정" in tn:
+            if "차리" in tn and "판정" not in tn:  # 순수 차리만 (판정/건증판정/클리닉 차리/판정 제외)
                 shift_allowed_tids.add(t['task_id'])
 
     # 3) CP-SAT 한 번 실행

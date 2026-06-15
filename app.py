@@ -639,9 +639,9 @@ with tabs[6]:
         )
     with set_col2:
         st.session_state.cpsat_extra_shift = st.number_input(
-            "차리/판정 추가 -1 이동 허용 개수", min_value=0, max_value=100,
+            "차리 추가 -1 이동 허용 개수", min_value=0, max_value=100,
             value=st.session_state.cpsat_extra_shift, step=1,
-            help="슬롯 부족 날짜는 자동으로 -1 이동이 허용됩니다. 그 외에도 이 개수만큼 차리/판정을 직전 평일로 이동 허용 (빡빡해서 해가 없을 때 늘려보세요)."
+            help="슬롯 부족 날짜는 자동으로 차리/판정 -1 이동이 허용됩니다. 그 외에도 이 개수만큼 '차리'(판정 제외)를 직전 평일로 이동 허용 (빡빡해서 해가 없을 때 늘려보세요)."
         )
 
     # === 로딩 범위 / 부등호(H17) 설정 ===
