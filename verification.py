@@ -4,6 +4,7 @@
 - 실제 생성된 주차별 스케줄과 비교
 - 누락/추가 항목을 보고하되, 공휴일/교수휴진이 사유면 자동 안내
 """
+import re
 from datetime import timedelta, datetime
 
 # ============================================================
@@ -23,11 +24,13 @@ EXPECTED_SCHEDULE = {
         {"name": "처치 (오후)", "cycle": "매주"},
         # 판정 참관
         {"name": "Pf. 조수환 판정 참관 (오전)", "cycle": "매주"},
-        {"name": "Pf. 김하진 판정 참관 (오전)", "cycle": "매주"},
+        {"name": "Pf. 권혁태 판정 참관 (오전)", "cycle": "매주"},
+        # 비만클리닉 참관 (권혁태)
+        {"name": "Pf. 권혁태 비만클리닉 참관 (오후)", "cycle": "매주"},
         # 건증 판정
         {"name": "Pf. 박민선 건증 판정 (수)", "cycle": "매주"},
         {"name": "Pf. 민경하 건증 판정 (목)", "cycle": "매주"},
-        {"name": "Pf. 전혜령 건증 판정 (목)", "cycle": "홀수주"},  # 격주
+        {"name": "Pf. 전혜령 건증 판정 (목)", "cycle": "홀수주", "bw_key": "전혜령|목|오후|건증"},  # 격주(주차 사용자설정)
         # 외래/암외래 참관
         {"name": "Pf. 조비룡 외래 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 윤재문 외래 참관 (오전)", "cycle": "매주"},
@@ -56,8 +59,10 @@ EXPECTED_SCHEDULE = {
         {"name": "Pf. 윤재문 건증 판정 (목)", "cycle": "매주"},
         {"name": "Pf. 민경하 건증 판정 (금)", "cycle": "매주"},
         {"name": "Pf. 고아령 건증 판정 (목)", "cycle": "매주"},
+        {"name": "Pf. 김하진 건증 판정 (금)", "cycle": "매주"},
         # 참관
         {"name": "Pf. 박민선 외래 참관 (오전)", "cycle": "매주"},
+        {"name": "Pf. 권혁태 외래 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 조수환 외래 참관 (오후)", "cycle": "매주"},
         {"name": "Pf. 조수환 암외래 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 김계형 외래 참관 (오후)", "cycle": "매주"},
@@ -72,6 +77,7 @@ EXPECTED_SCHEDULE = {
         {"name": "Pf. 김지영 외래 차리 (목)", "cycle": "매주"},
         {"name": "Pf. 황서은 외래 차리 (금)", "cycle": "매주"},
         {"name": "Pf. 김하진 외래 차리 (목)", "cycle": "매주"},
+        {"name": "Pf. 권혁태 외래 차리 (금)", "cycle": "매주"},
     ],
     "수": [
         {"name": "예진", "cycle": "매주"},
@@ -81,16 +87,15 @@ EXPECTED_SCHEDULE = {
         {"name": "Pf. 박민선 판정 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 박진호 판정 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 민경하 판정 참관 (오후)", "cycle": "매주"},
-        # 격주 - 조우현(홀)/김계형(짝) (※ 정답지는 task 생성 주차 기준 - 판정 참관은 진료 당일)
-        {"name": "Pf. 조우현 판정 참관 (오후)", "cycle": "홀수주"},
-        {"name": "Pf. 김계형 판정 참관 (오후)", "cycle": "짝수주"},
+        # 조우현(홀)/김계형(짝)은 둘이 나눠 맡는 진료 → 매주 1개 합친 task로 생성
+        {"name": "Pf. 조우현(홀)/김계형(짝) 판정 참관 (오후)", "cycle": "매주"},
         # 클리닉 차리/판정
         {"name": "Pf. 조비룡 클리닉 차리/판정 (목)", "cycle": "매주"},
         # 건증 판정
         {"name": "Pf. 윤재문 건증 판정 (금)", "cycle": "매주"},
         {"name": "Pf. 황서은 건증 판정 (금)", "cycle": "매주"},
         {"name": "Pf. 김지영 건증 판정 (금)", "cycle": "매주"},
-        {"name": "Pf. 김하진 건증 판정 (월)", "cycle": "매주"},
+        {"name": "Pf. 권혁태 건증 판정 (월)", "cycle": "매주"},
         # 참관
         {"name": "Pf. 조비룡 외래 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 박상민 외래 참관 (오후)", "cycle": "매주"},
@@ -105,6 +110,7 @@ EXPECTED_SCHEDULE = {
         {"name": "Pf. 김하진 암외래 차리 (금)", "cycle": "매주"},
         {"name": "Pf. 조수환 암외래 차리 (목 오후)", "cycle": "매주"},
         {"name": "Pf. 조수환 암외래 차리 (목 오전)", "cycle": "매주"},
+        {"name": "Pf. 권혁태 비만클리닉 차리 (월)", "cycle": "매주"},
     ],
     "목": [
         {"name": "예진", "cycle": "매주"},
@@ -113,7 +119,7 @@ EXPECTED_SCHEDULE = {
         # 판정 참관
         {"name": "Pf. 윤재문 판정 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 고아령 판정 참관 (오후)", "cycle": "매주"},
-        {"name": "Pf. 전혜령 판정 참관 (오후)", "cycle": "홀수주"},  # 격주
+        {"name": "Pf. 전혜령 판정 참관 (오후)", "cycle": "홀수주", "bw_key": "전혜령|목|오후|건증"},  # 격주(주차 사용자설정)
         # 클리닉 차리/판정
         {"name": "Pf. 박민선 클리닉 차리/판정 (월)", "cycle": "매주"},
         # 건증 판정
@@ -136,6 +142,7 @@ EXPECTED_SCHEDULE = {
         {"name": "Pf. 민경하 외래 차리 (화)", "cycle": "매주"},
         {"name": "Pf. 김하진 외래 차리 (월)", "cycle": "매주"},
         {"name": "Pf. 민경하 암외래 차리 (화)", "cycle": "매주"},
+        {"name": "Pf. 권혁태 외래 차리 (화)", "cycle": "매주"},
     ],
     "금": [
         {"name": "예진", "cycle": "매주"},
@@ -146,12 +153,11 @@ EXPECTED_SCHEDULE = {
         {"name": "Pf. 황서은 판정 참관 (오전)", "cycle": "매주"},
         {"name": "Pf. 민경하 판정 참관 (오후)", "cycle": "매주"},
         {"name": "Pf. 김지영 판정 참관 (오후)", "cycle": "매주"},
+        {"name": "Pf. 김하진 판정 참관 (오후)", "cycle": "매주"},
         # 건증 판정
         {"name": "Pf. 조비룡 건증 판정 (화)", "cycle": "매주"},
-        # 격주 - 조우현 건증 진료(홀수주 수요일)의 task는 직전주(짝수주) 금요일에 생성됨
-        # 김계형 건증 진료(짝수주 수요일)의 task는 직전주(홀수주) 금요일에 생성됨
-        {"name": "Pf. 조우현 건증 판정 (수)", "cycle": "짝수주"},
-        {"name": "Pf. 김계형 건증 판정 (수)", "cycle": "홀수주"},
+        # 조우현(홀)/김계형(짝)은 둘이 나눠 맡는 진료 → 매주 1개 합친 task (건증 판정은 직전 금요일 생성)
+        {"name": "Pf. 조우현(홀)/김계형(짝) 건증 판정 (수)", "cycle": "매주"},
         {"name": "Pf. 황서은 건증 판정 (화)", "cycle": "매주"},
         {"name": "Pf. 민경하 건증 판정 (수)", "cycle": "매주"},
         # 참관
@@ -159,6 +165,7 @@ EXPECTED_SCHEDULE = {
         {"name": "Pf. 윤재문 외래 참관 (오후)", "cycle": "매주"},
         {"name": "Pf. 황서은 외래 참관 (오후)", "cycle": "매주"},
         {"name": "Pf. 김하진 암외래 참관 (오전)", "cycle": "매주"},
+        {"name": "Pf. 권혁태 외래 참관 (오전)", "cycle": "매주"},
         # 차리
         {"name": "Pf. 조비룡 외래 차리 (월)", "cycle": "매주"},
         {"name": "Pf. 김계형 외래 차리 (화)", "cycle": "매주"},
@@ -174,12 +181,16 @@ def _normalize(name):
     return name.replace(" ", "")
 
 
-def _is_expected_in_week(item, week_num):
+def _is_expected_in_week(item, week_num, biweekly_choice=None):
     """해당 주차에 정답 항목이 있어야 하는지 판정"""
     cycle = item["cycle"]
     if cycle == "매주":
         return True
     is_odd = (week_num % 2 == 1)
+    # 단독 격주: 사용자가 주차 설정 팝업에서 고른 주차를 우선 반영
+    bw_key = item.get("bw_key")
+    if bw_key and biweekly_choice and biweekly_choice.get(bw_key) in ("odd", "even"):
+        return is_odd if biweekly_choice[bw_key] == "odd" else (not is_odd)
     if cycle == "홀수주":
         return is_odd
     if cycle == "짝수주":
@@ -256,11 +267,26 @@ def _check_exclusion_reason(item, day_date_str, day_name, holidays, off_slots, t
         next_week_tag = " [다음주]" if (is_prep_task and (clinic_wd - self_wd) <= 0) else ""
         return f"{prof} 교수 {clinic_day}요일({clinic_date_str}){next_week_tag} 공휴일 사유로 제외"
 
-    # 진료 교수 그 날짜 휴진?
-    for p, d in off_slots:
-        if p == prof and d == clinic_date_str:
-            next_week_tag = " [다음주]" if (is_prep_task and (clinic_wd - self_wd) <= 0) else ""
+    # 진료 교수 그 날짜 휴진? (반일 휴진 지원: (교수, 날짜, '오전'/'오후'))
+    # 합쳐진 격주 교수명 "조우현(홀)/김계형(짝)" → 두 멤버 중 한 명이라도 휴진이면 사유 인정
+    if '/' in (prof or ''):
+        _members = [re.sub(r'\(.*?\)', '', x).strip() for x in prof.split('/')]
+    else:
+        _members = [prof]
+    for _s in off_slots:
+        if not _s or len(_s) < 2:
+            continue
+        p, d = _s[0], _s[1]
+        if p not in _members or d != clinic_date_str:
+            continue
+        off_time = _s[2] if len(_s) >= 3 else None
+        next_week_tag = " [다음주]" if (is_prep_task and (clinic_wd - self_wd) <= 0) else ""
+        if off_time in (None, '', '종일'):
             return f"{prof} 교수 {clinic_day}요일({clinic_date_str}){next_week_tag} 휴진 사유로 제외"
+        # 반일 휴진은 그 시간대 task만 제외 사유가 된다
+        if f"({off_time})" in (task_name or ''):
+            return (f"{prof} 교수 {clinic_day}요일({clinic_date_str}){next_week_tag} "
+                    f"{off_time} 휴진 사유로 제외")
 
     return None
 
@@ -269,7 +295,8 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
                     supplementary_schedules=None, assignments=None,
                     task_date_overrides=None, task_time_overrides=None,
                     shifted_tasks=None, original_df_dates=None,
-                    master_schedules=None):
+                    master_schedules=None, skipped_task_ids=None,
+                    prev_month_task_ids=None, biweekly_choice=None):
     """
     실제 생성된 df_all을 정답지와 비교 + 미배정 task 탐지.
     
@@ -289,6 +316,7 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
                 "moved_out": [{"name": ..., "to_date": ..., "reason": ...}, ...],
                   # 이 날짜에서 나간 task
                 "unassigned": [task_name, ...],
+                "skipped": [task_name, ...],   # 판정참관 제외룰로 '안 하기로 한' task (미배정 아님)
                 "total_expected": int,
                 "total_present": int,
             }
@@ -307,6 +335,8 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
         shifted_tasks = []
     if original_df_dates is None:
         original_df_dates = {}
+    _skipped_ids = set(skipped_task_ids or [])
+    _prev_month_ids = set(prev_month_task_ids or [])
 
     weekday_names = ["월", "화", "수", "목", "금"]
     result = {}
@@ -438,7 +468,7 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
             actual_set_norm = {_normalize(t): t for t in actual_tasks}
 
             # 정답 목록 중 이 주차에 있어야 하는 것들
-            expected_items = [item for item in EXPECTED_SCHEDULE.get(day_name, []) if _is_expected_in_week(item, week)]
+            expected_items = [item for item in EXPECTED_SCHEDULE.get(day_name, []) if _is_expected_in_week(item, week, biweekly_choice)]
             expected_set_norm = {_normalize(item["name"]): item for item in expected_items}
 
             # 이 날짜로 들어온 task (이동) — 원래 다른 날짜에 있던 task가 여기로 옴
@@ -504,13 +534,23 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
                     else:
                         extra.append({"name": original, "reason": None})
 
-            # 미배정 task 탐지
+            # 미배정 task 탐지:
+            #   - 제외룰로 '안 하기로 한' 판정참관 → skipped
+            #   - 이전 달 참관(orphan) 중 배정 안 한 것 → prev_skipped
+            #   - 그 외 → unassigned (진짜 미배정)
             unassigned = []
+            skipped = []
+            prev_skipped = []
             for _, row in day_df.iterrows():
                 tid = row["task_id"]
                 assignee = assignments.get(tid, "")
                 if not assignee:
-                    unassigned.append(row["task"])
+                    if tid in _prev_month_ids:
+                        prev_skipped.append(row["task"])
+                    elif tid in _skipped_ids:
+                        skipped.append(row["task"])
+                    else:
+                        unassigned.append(row["task"])
 
             result[week][day_name] = {
                 "date": day_date_str,
@@ -519,6 +559,8 @@ def verify_schedule(df_all, week_count, base_date, holidays, off_slots,
                 "moved_in": moved_in,
                 "moved_out": moved_out,
                 "unassigned": unassigned,
+                "skipped": skipped,
+                "prev_skipped": prev_skipped,
                 "total_expected": len(expected_items),
                 "total_present": len(actual_tasks),
             }

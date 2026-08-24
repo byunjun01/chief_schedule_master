@@ -2,7 +2,7 @@ import pandas as pd
 import random
 from datetime import timedelta, datetime
 
-PROF_ORDER = ["조비룡", "박민선", "박진호", "박상민", "윤재문", "황서은", "조수환", "민경하", "김지영", "김하진", "고아령", "김계형", "조우현", "전혜령"]
+PROF_ORDER = ["조비룡", "박민선", "박진호", "권혁태", "박상민", "윤재문", "황서은", "조수환", "민경하", "김지영", "김하진", "고아령", "김계형", "조우현", "전혜령"]
 
 def get_task_style(task_name):
     if not task_name: return "white", "black"
@@ -10,20 +10,36 @@ def get_task_style(task_name):
     if any(kw in task_name for kw in ["연보", "연건 보건소"]): return "#FF85FF", "black"
     if "예진" in task_name: return "#CCCCFF", "black"
     if "처치" in task_name: return "#DDEBF7", "black"
-    # 통증클리닉 참관은 외래참관과 동일 색(#FBE5D7). "클리닉 참관"보다 먼저 매칭되어야 함
-    if any(kw in task_name for kw in ["외래 참관", "통증클리닉 참관"]): return "#FBE5D7", "black"
+    # 통증클리닉/비만클리닉 참관은 외래참관과 동일 색(#FBE5D7). "클리닉 참관"보다 먼저 매칭되어야 함
+    if any(kw in task_name for kw in ["외래 참관", "통증클리닉 참관", "비만클리닉 참관"]): return "#FBE5D7", "black"
     if any(kw in task_name for kw in ["판정 참관", "건증 참관", "클리닉 참관"]): return "#F2CEF0", "black"
     if "건증 판정" in task_name or (any(p in task_name for p in ["조비룡", "박민선"]) and "클리닉 판정" in task_name): return "#E2F0D9", "black"
     if any(kw in task_name for kw in ["외래 차리", "통증클리닉 차리", "차리"]): return "#FFF2CC", "black"
     return "white", "black"
 
-def get_prof_raw_style(clinic_name, is_off, is_holiday, is_skip):
+def get_prof_raw_style(clinic_name, is_off, is_holiday, is_skip,
+                       prof=None, has_chari=True, has_chamgwan=True):
+    """교수별 시간표의 셀 색.
+    has_chari/has_chamgwan: master_schedules의 '차리생성'/'참관생성' 플래그.
+    둘 다 False이면 task가 생성되지 않으므로 흰배경 (재택외래 등).
+    """
     if is_holiday: return "#D3D3D3", "black", "none"
     if is_off: return "#FADBD8", "#C0392B", "none"
     if is_skip: return "#FFFFFF", "#AAAAAA", "1px dashed #CCCCCC"
-    if "건증" in clinic_name: return "#FFF2CC", "black", "none"
-    if "클리닉" in clinic_name or "통증" in clinic_name: return "#F5F5DC", "black", "none"
-    if "외래" in clinic_name: return "#E2F0D9", "black", "none"
+    # 차리/참관 둘 다 미생성 → task 0개 → 흰배경
+    if not has_chari and not has_chamgwan:
+        return "white", "black", "none"
+    # 진료명이 '클리닉'/'통증클리닉' 자체인 경우만 클리닉 색
+    if "클리닉" in clinic_name or "통증" in clinic_name:
+        return "#FFF2CC", "black", "none"
+    if "판정" in clinic_name and "건증" not in clinic_name:
+        return "#FFF2CC", "black", "none"   # 단독 판정 (민경하 등)
+    if "건증" in clinic_name:
+        return "#FFD966", "black", "none"
+    if "암외래" in clinic_name or "외래" in clinic_name:
+        if has_chari and has_chamgwan:
+            return "#70AD47", "black", "none"   # 차리+참관
+        return "#D9EAD3", "black", "none"        # 차리만 또는 참관만
     return "white", "black", "none"
 
 RAW_SCHEDULES_INITIAL = [
@@ -33,6 +49,8 @@ RAW_SCHEDULES_INITIAL = [
     ("박민선", "수", "오전", "건증", "매주", True, True, None), ("박민선", "목", "오전", "외래", "매주", True, True, None),
     ("박진호", "월", "오후", "외래", "매주", True, True, None), ("박진호", "수", "오전", "건증", "매주", True, True, None),
     ("박진호", "목", "오후", "통증클리닉", "매주", True, True, None), ("박진호", "금", "오전", "외래", "매주", True, True, None),
+    ("권혁태", "화", "오전", "외래", "매주", True, True, None), ("권혁태", "금", "오전", "외래", "매주", True, True, None),
+    ("권혁태", "월", "오전", "건증", "매주", True, True, None), ("권혁태", "월", "오후", "비만클리닉", "매주", True, True, None),
     ("박상민", "수", "오후", "외래", "매주", True, True, None), ("박상민", "목", "오전", "외래", "매주", True, True, None),
     ("윤재문", "월", "오전", "외래", "매주", True, True, None), ("윤재문", "목", "오전", "건증", "매주", True, True, None),
     ("윤재문", "금", "오전", "건증", "매주", True, True, None), ("윤재문", "금", "오후", "외래", "매주", True, True, None),
@@ -48,9 +66,9 @@ RAW_SCHEDULES_INITIAL = [
     ("김지영", "월", "오후", "암외래", "매주", True, True, None), ("김지영", "화", "오전", "관악", "매주", False, False, None),
     ("김지영", "화", "오후", "관악", "매주", False, False, None), ("김지영", "수", "오전", "암외래", "매주", True, True, None),
     ("김지영", "목", "오후", "외래", "매주", True, True, None), ("김지영", "금", "오후", "건증", "매주", True, True, None),
-    ("김하진", "월", "오전", "건증", "매주", True, True, None), ("김하진", "월", "오후", "외래", "매주", True, True, None),
+    ("김하진", "월", "오후", "외래", "매주", True, True, None),
     ("김하진", "화", "오후", "건증", "매주", True, True, None), ("김하진", "목", "오후", "외래", "매주", True, True, None),
-    ("김하진", "금", "오전", "암외래", "매주", True, True, None),
+    ("김하진", "금", "오전", "암외래", "매주", True, True, None), ("김하진", "금", "오후", "건증", "매주", True, True, None),
     ("고아령", "목", "오후", "건증", "매주", True, True, None), ("고아령", "금", "오전", "외래", "매주", False, False, None),
     ("김계형", "월", "오후", "재택외래", "매주", False, False, None), ("김계형", "화", "오후", "외래", "매주", True, True, None),
     ("김계형", "수", "오후", "건증", "짝수주", True, True, None), ("김계형", "목", "오전", "재택외래", "매주", False, False, None),
@@ -81,6 +99,16 @@ def get_prep_dt(target_date, prof, t_name, clinic, orig_day, holidays):
         elif orig_day == "금" and "외래" in clinic: target_prep = target_date - timedelta(days=3)
         elif orig_day == "수" and "건증" in clinic: target_prep = target_date - timedelta(days=6)
         else: target_prep = target_date
+    elif prof == "권혁태":
+        # 화(오전) 참관 → 그 전주 목요일 차리 (5일 전)
+        # 금(오전) 참관 → 같은 주 화요일 차리 (3일 전)
+        # 월(오전) 건증 참관 → 그 전주 수요일 판정 (5일 전)
+        # 월(오후) 비만클리닉 참관 → 그 전주 수요일 차리 (5일 전)
+        if orig_day == "화" and "외래" in clinic: target_prep = target_date - timedelta(days=5)
+        elif orig_day == "금" and "외래" in clinic: target_prep = target_date - timedelta(days=3)
+        elif orig_day == "월" and "건증" in clinic: target_prep = target_date - timedelta(days=5)
+        elif orig_day == "월" and "비만" in clinic: target_prep = target_date - timedelta(days=5)
+        else: target_prep = target_date
     elif prof in ["고아령", "김지영", "박상민"]: shift = 2
     elif prof == "윤재문":
         # 외래 차리 + 금요일 진료 조합만 shift=3 (금→화), 그 외는 모두 shift=2
@@ -104,18 +132,79 @@ def get_prep_dt(target_date, prof, t_name, clinic, orig_day, holidays):
     elif prof == "전혜령": shift = 3 if "판정" in t_name else 2
     else: shift = 0
     if shift > 0: target_prep = sub_days_skip_weekends(target_date, shift)
-    elif prof != "박진호": target_prep = target_date
+    elif prof not in ("박진호", "권혁태"): target_prep = target_date
     return find_nearest_working_day(target_prep, holidays), forced_time
 
-def generate_schedule(start_date, total_weeks, holidays, master_df, off_slots, supplementary_schedules=None):
+def is_prof_off(off_slots, prof, date_str, time=None):
+    """교수 휴진 여부. off_slots 항목은 두 가지 형태를 모두 허용한다.
+      (교수, 'MM-DD')            → 그날 종일 휴진 (기존 형식, 하위호환)
+      (교수, 'MM-DD', '오전')     → 그날 오전만 휴진
+      (교수, 'MM-DD', '종일')     → 그날 종일 휴진
+    time=None이면 '종일 휴진일 때만' True (반일 휴진은 해당 시간대를 물어봐야 알 수 있음).
+    """
+    if not off_slots:
+        return False
+    for s in off_slots:
+        if not s or len(s) < 2:
+            continue
+        if s[0] != prof or s[1] != date_str:
+            continue
+        slot_time = s[2] if len(s) >= 3 else None
+        if slot_time in (None, '', '종일'):
+            return True                 # 종일 휴진
+        if time is not None and slot_time == time:
+            return True                 # 해당 반일만 휴진
+    return False
+
+
+def biweekly_week_active(cycle, week_num, bw_key=None, biweekly_choice=None):
+    """격주(홀수주/짝수주) 진료가 해당 주차에 활성인지 판정.
+    - 단독 격주: biweekly_choice[bw_key]('odd'/'even')가 있으면 그 선택을 우선.
+    - 둘이 나눠 맡는 슬롯(합친 진료)의 bw_key는 biweekly_choice에 없으므로 라벨 기본값 사용.
+    """
+    if cycle == "매주":
+        return True
+    is_odd = (week_num % 2 == 1)
+    if bw_key and biweekly_choice and biweekly_choice.get(bw_key) in ("odd", "even"):
+        return is_odd if biweekly_choice[bw_key] == "odd" else (not is_odd)
+    if cycle == "홀수주":
+        return is_odd
+    if cycle == "짝수주":
+        return not is_odd
+    return True
+
+
+def generate_schedule(start_date, total_weeks, holidays, master_df, off_slots, supplementary_schedules=None,
+                      biweekly_choice=None):
     """
     supplementary_schedules: list of dict
         [{"교수": "박상민", "날짜": "06-15", "시간": "오전", "진료명": "외래"}, ...]
         단발성 보충진료. 마스터 스케줄의 매주 진료와 동일한 방식으로 차리/판정/참관이 자동 생성됨.
+    biweekly_choice: dict, 단독 격주 진료의 생성 주차 선택.
+        key = "교수|요일|시간|진료명", value = 'odd'(1·3·5주차) / 'even'(2·4주차).
+        없으면 라벨 기본값(홀수주→odd, 짝수주→even) 사용.
     """
     if supplementary_schedules is None:
         supplementary_schedules = []
+    if biweekly_choice is None:
+        biweekly_choice = {}
     weekday_names = ["월", "화", "수", "목", "금"]
+
+    # === 격주(홀수주/짝수주) 진료 사전 분석 ===
+    #  - 같은 (요일,시간,진료명) 슬롯에 홀수주+짝수주 서로 다른 교수가 있으면 → 둘이 나눠 맡는 진료.
+    #    매주 1개의 합친 task로 생성하고 이름에 (홀)/(짝) 라벨을 붙임 (사용자가 주차 보고 담당 확인).
+    #    준비일(판정)은 홀수주 대표교수 기준으로 계산 → get_prep_dt 그대로 사용.
+    #  - 짝이 없는 단독 격주는 biweekly_choice로 생성 주차를 정함 (없으면 라벨 기본값).
+    _biweekly_groups = {}
+    for _, _r in master_df.iterrows():
+        if pd.isna(_r.get("교수명")) or not str(_r.get("교수명")).strip():
+            continue
+        _cyc = str(_r["주기"])
+        if _cyc in ("홀수주", "짝수주"):
+            _k = (str(_r["요일"]), str(_r["시간"]), str(_r["진료명"]) if pd.notna(_r["진료명"]) else "")
+            _biweekly_groups.setdefault(_k, {})[_cyc] = str(_r["교수명"])
+    # 둘이 나눠 맡는 슬롯: 홀·짝 둘 다 존재
+    _shared_slots = {k: v for k, v in _biweekly_groups.items() if "홀수주" in v and "짝수주" in v}
     display_end_date = start_date + timedelta(days=total_weeks*7 - 1)
     full_data = []
 
@@ -125,7 +214,8 @@ def generate_schedule(start_date, total_weeks, holidays, master_df, off_slots, s
         """
         date_str = current_date.strftime("%m-%d")
         is_hc = "건증" in clinic
-        is_cl = "클리닉" in clinic
+        # 비만클리닉은 이름만 클리닉이고 실제는 외래처럼 동작 (차리+참관 세트)
+        is_cl = "클리닉" in clinic and "비만" not in clinic
         sup_tag = "_SUP" if is_supplementary else ""
         pair_base_id = f"{week_num}_{d_name}_{prof}_{clinic}_{date_str}{sup_tag}"
         task_types = []
@@ -166,6 +256,8 @@ def generate_schedule(start_date, total_weeks, holidays, master_df, off_slots, s
             elif not is_prep and current_date <= display_end_date:
                 if prof == "박진호" and "통증클리닉" in clinic:
                     f_task = f"Pf. {prof} 통증클리닉 참관 ({time})".replace("  ", " ").strip()
+                elif "비만클리닉" in clinic:
+                    f_task = f"Pf. {prof} 비만클리닉 참관 ({time})".replace("  ", " ").strip()
                 elif is_hc or is_cl:
                     f_task = f"Pf. {prof} 판정 참관 ({time})".replace("  ", " ").strip()
                 else:
@@ -191,12 +283,35 @@ def generate_schedule(start_date, total_weeks, holidays, master_df, off_slots, s
                 gen_chair = bool(row["차리생성"])
                 gen_obs = bool(row["참관생성"])
                 if day != d_name: continue
-                if (cycle == "홀수주" and week_num % 2 == 0) or (cycle == "짝수주" and week_num % 2 != 0): continue
+                # gen_prof: task 이름에 쓸 교수명 (합친 격주 진료는 라벨명으로 대체, 그 외엔 원래 교수명)
+                gen_prof = prof
+                off_check_prof = prof   # 휴진 체크 대상 (공유 격주는 그 주 실제 담당자로 교체)
+                if cycle in ("홀수주", "짝수주"):
+                    _slot = (day, time, clinic)
+                    if _slot in _shared_slots:
+                        # 둘이 나눠 맡는 진료 → 짝수주 멤버 행은 건너뛰고, 홀수주 멤버가 대표로 매주 생성
+                        if cycle == "짝수주":
+                            continue
+                        _odd_p = _shared_slots[_slot]["홀수주"]
+                        _even_p = _shared_slots[_slot]["짝수주"]
+                        gen_prof = f"{_odd_p}(홀)/{_even_p}(짝)"
+                        # 이번 달 실제 담당: biweekly_choice['{홀라벨교수}|요일|시간|진료명']
+                        #   'odd'(기본) = 홀라벨 교수가 1·3·5주 / 'even' = 홀라벨 교수가 2·4주(→짝라벨이 1·3·5)
+                        _sh_choice = biweekly_choice.get(f"{_odd_p}|{day}|{time}|{clinic}")
+                        _odd_on_135 = (_sh_choice != 'even')
+                        _is_odd_week = (week_num % 2 == 1)
+                        off_check_prof = _odd_p if (_is_odd_week == _odd_on_135) else _even_p
+                        # (주차 필터 없이 매주 생성하되, 그 주 담당자가 휴진이면 아래에서 스킵)
+                    else:
+                        # 단독 격주 → 사용자 선택 주차 (없으면 라벨 기본값: 홀수주→odd, 짝수주→even)
+                        if not biweekly_week_active(cycle, week_num, f"{prof}|{day}|{time}|{clinic}", biweekly_choice):
+                            continue
                 if date_str in holidays: continue
-                if (prof, date_str) in off_slots: continue
+                if is_prof_off(off_slots, off_check_prof, date_str, time): continue
                 is_hc = "건증" in clinic
-                is_cl = "클리닉" in clinic
-                pair_base_id = f"{week_num}_{d_name}_{prof}_{clinic}"
+                # 비만클리닉은 이름만 클리닉이고 실제는 외래처럼 동작
+                is_cl = "클리닉" in clinic and "비만" not in clinic
+                pair_base_id = f"{week_num}_{d_name}_{gen_prof}_{clinic}"
                 task_types = []
                 if is_hc or is_cl:
                     task_types.append(("판정", True))
@@ -218,20 +333,23 @@ def generate_schedule(start_date, total_weeks, holidays, master_df, off_slots, s
                                 if prof == "조수환" and "암외래" in clinic:
                                     day_info = f"({day})" if day == "화" else f"({day} {time})"
                                 else: day_info = f"({day})"
-                                f_task = f"Pf. {prof} {clinic} {t_suffix} {day_info}".replace("외래 외래", "외래").replace("  ", " ").strip()
-                                full_data.append({"date": p_date_str, "week": p_week, "day": weekday_names[prep_dt.weekday()], "time": f_time, "prof": prof, "task": f_task, "pair_id": pair_base_id})
+                                f_task = f"Pf. {gen_prof} {clinic} {t_suffix} {day_info}".replace("외래 외래", "외래").replace("  ", " ").strip()
+                                full_data.append({"date": p_date_str, "week": p_week, "day": weekday_names[prep_dt.weekday()], "time": f_time, "prof": gen_prof, "task": f_task, "pair_id": pair_base_id})
                     elif not is_prep and gen_obs and current_date <= display_end_date:
                         # 참관 task 이름 규칙:
                         #  - 박진호 통증클리닉: "Pf. 박진호 통증클리닉 참관 (오전/오후)" (가장 먼저 체크)
+                        #  - 비만클리닉: "Pf. {교수} 비만클리닉 참관 (오전/오후)" (외래처럼 동작하지만 이름은 클리닉)
                         #  - 판정 참관(건증/그 외 클리닉): 진료명 제거 → "Pf. {교수} 판정 참관 (오전/오후)"
                         #  - 외래 참관: 진료명 유지 → "Pf. {교수} {진료명} 참관 (오전/오후)" ("외래 외래"는 "외래"로)
                         if prof == "박진호" and "통증클리닉" in clinic:
-                            f_task = f"Pf. {prof} 통증클리닉 참관 ({time})".replace("  ", " ").strip()
+                            f_task = f"Pf. {gen_prof} 통증클리닉 참관 ({time})".replace("  ", " ").strip()
+                        elif "비만클리닉" in clinic:
+                            f_task = f"Pf. {gen_prof} 비만클리닉 참관 ({time})".replace("  ", " ").strip()
                         elif is_hc or is_cl:
-                            f_task = f"Pf. {prof} 판정 참관 ({time})".replace("  ", " ").strip()
+                            f_task = f"Pf. {gen_prof} 판정 참관 ({time})".replace("  ", " ").strip()
                         else:
-                            f_task = f"Pf. {prof} {clinic} 외래 참관 ({time})".replace("외래 외래", "외래").replace("  ", " ").strip()
-                        full_data.append({"date": date_str, "week": week_num, "day": d_name, "time": time, "prof": prof, "task": f_task, "pair_id": pair_base_id})
+                            f_task = f"Pf. {gen_prof} {clinic} 외래 참관 ({time})".replace("외래 외래", "외래").replace("  ", " ").strip()
+                        full_data.append({"date": date_str, "week": week_num, "day": d_name, "time": time, "prof": gen_prof, "task": f_task, "pair_id": pair_base_id})
 
     # === [신규] 보충진료 처리 ===
     # 단발성 진료 세션을 받아서 마스터와 동일한 방식으로 차리/판정/참관 자동 생성
@@ -278,7 +396,7 @@ def get_resident_target_mult(resident):
     else: return 8.5  # R0
 
 
-def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays, off_slots, master_schedules_df, supplementary_schedules=None, rad_days=None, student_practices=None, bogeonso_substitutes=None, loading_ranges=None):
+def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays, off_slots, master_schedules_df, supplementary_schedules=None, rad_days=None, student_practices=None, bogeonso_substitutes=None, loading_ranges=None, skip_panjung_obs=None, biweekly_choice=None):
     """
     사전 진단: 일반 배정 가능한 슬롯 수 vs 배정해야 할 task 수를 비교하여
     사용자 지정 target_mult로 배정 가능한지 판단하고, 필요한 경우 자동 상향 배수를 계산.
@@ -345,15 +463,48 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
 
     # === 2) 일반 배정 task 수 계산 ===
     # generate_schedule 결과에서 영상/보건소 task와 영상 파견자 클리닉 차리/판정 task를 제외
-    df_all = generate_schedule(start_date, week_count, holidays, master_schedules_df, off_slots, supplementary_schedules=supplementary_schedules)
+    df_all = generate_schedule(start_date, week_count, holidays, master_schedules_df, off_slots, supplementary_schedules=supplementary_schedules, biweekly_choice=biweekly_choice)
 
     # 영상 파견자가 받을 클리닉 차리/판정 수 추정 = 영상 파견자 수 × week_count
     # (각 영상 파견자가 주당 1개 받음)
     rad_resident_count = sum(1 for r in residents if "본원 영상" in r.get('역할', []) and rad_days.get(r['이름']))
     estimated_rad_clinic_tasks = rad_resident_count * week_count
 
-    # 전체 task 수에서 영상 파견자가 가져갈 task 수만큼 제외 (일반 풀 로딩 비율 계산용)
-    general_tasks = len(df_all) - estimated_rad_clinic_tasks
+    # === 2-b) 판정참관 제외 대상이 있으면 드롭될 판정참관 수를 근사 차감 ===
+    # 규칙: 제외 대상이 건증 판정을 받으면 그 짝의 판정참관은 아무에게도 배정되지 않는다.
+    # 누가 그 판정을 받을지는 솔버가 정하므로, 영상 클리닉 추정과 같은 방식으로 기대값만 잡는다.
+    #   (제외 대상의 판정 수용량 비중) × (전체 판정 중 건증 판정 비율)
+    estimated_skipped_obs = 0
+    skip_set = {n for n in (skip_panjung_obs or [])}
+    if skip_set:
+        # 짝이 완전한(건증 판정 + 판정참관) 묶음 수
+        pair_tasks = {}
+        for _, row in df_all.iterrows():
+            pid = row.get('pair_id') or ''
+            if pid:
+                pair_tasks.setdefault(pid, []).append(row['task'])
+        geonjeung_pairs = 0
+        for tnames in pair_tasks.values():
+            if not any("건증" in t for t in tnames):
+                continue
+            has_judge = any(("판정" in t and "참관" not in t) for t in tnames)
+            has_obs = any(("판정" in t and "참관" in t) for t in tnames)
+            if has_judge and has_obs:
+                geonjeung_pairs += 1
+        # 전체 일반 판정 task 수 (참관 제외)
+        all_panjung = sum(1 for t in df_all['task'] if "판정" in t and "참관" not in t)
+
+        def _panjung_capacity(r):
+            # H8: R3(영상 제외)는 일반 판정 정확히 1개 / H18: R2·R1·R0는 주당 ~1개
+            return 1.0 if r['연차'] == "R3" else float(week_count)
+
+        skip_cap = sum(_panjung_capacity(r) for r in general_residents if r['이름'] in skip_set)
+        if skip_cap > 0 and all_panjung > 0 and geonjeung_pairs > 0:
+            est = skip_cap * (geonjeung_pairs / all_panjung)
+            estimated_skipped_obs = int(round(min(est, geonjeung_pairs, skip_cap)))
+
+    # 전체 task 수에서 영상 파견자가 가져갈 task 수 + 드롭 예상 판정참관을 제외 (일반 풀 로딩 비율 계산용)
+    general_tasks = len(df_all) - estimated_rad_clinic_tasks - estimated_skipped_obs
     # 추가로 일반 task는 모두 일반 전공의 풀에서 처리하므로 그대로 사용
     # (보건소 task는 daily_slots에 직접 들어가는 거라 df_all에 없음)
 
@@ -377,8 +528,8 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
     try:
         from cpsat_solver import LOADING_RANGES as _DEFAULT_LR
     except Exception:
-        _DEFAULT_LR = {0: (4.9, 5.5), 1: (6.3, 6.8), 2: (6.5, 7.2), 3: (7.3, 7.9), 4: (8.0, 9.0)}
-    _lr = {g: tuple(loading_ranges[g]) for g in range(5)} if loading_ranges else dict(_DEFAULT_LR)
+        _DEFAULT_LR = {0: (4.9, 5.5), 1: (6.3, 6.8), 2: (6.5, 7.2), 3: (7.3, 7.9), 4: (7.5, 8.0), 5: (8.0, 9.0)}
+    _lr = {g: tuple(loading_ranges[g]) for g in range(6)} if loading_ranges else dict(_DEFAULT_LR)
 
     def _loading_group(r):
         """0:의국/교육수석 1:학생/진료수석 2:일반R3 3:R2 4:R1/R0 (보건소/영상은 general_residents에서 이미 제외)"""
@@ -419,10 +570,11 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
         multiplier = round(multiplier, 2)
         status = "부족"
 
+    _skip_note = f" | 판정참관 제외 추정 −{estimated_skipped_obs}개 반영" if estimated_skipped_obs else ""
     if status == "적합":
-        message = f"✅ 적합 — 배정 필요 task 총 {total_tasks_needed}개 (일반 {total_general_df_tasks} + 연보/메인/학생/영상 {forced_total}) | 일반 풀 필요 로딩 {required_avg:.2f} ≤ 지정 {ideal_avg:.2f}"
+        message = f"✅ 적합 — 배정 필요 task 총 {total_tasks_needed}개 (일반 {total_general_df_tasks} + 연보/메인/학생/영상 {forced_total}){_skip_note} | 일반 풀 필요 로딩 {required_avg:.2f} ≤ 지정 {ideal_avg:.2f}"
     else:
-        message = f"🔴 부족 — 배정 필요 task 총 {total_tasks_needed}개 (일반 {total_general_df_tasks} + 연보/메인/학생/영상 {forced_total}) | 일반 풀 필요 로딩 {required_avg:.2f} > 지정 {ideal_avg:.2f}, 자동 {multiplier:.2f}배 상향"
+        message = f"🔴 부족 — 배정 필요 task 총 {total_tasks_needed}개 (일반 {total_general_df_tasks} + 연보/메인/학생/영상 {forced_total}){_skip_note} | 일반 풀 필요 로딩 {required_avg:.2f} > 지정 {ideal_avg:.2f}, 자동 {multiplier:.2f}배 상향"
 
     return {
         "status": status,
@@ -431,6 +583,8 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
         "total_tasks_needed": total_tasks_needed,   # 배정 필요한 전체 work (일반+연보+메인+학생+영상)
         "total_general_df_tasks": total_general_df_tasks,
         "forced_total": forced_total,
+        "estimated_skipped_obs": estimated_skipped_obs,  # 판정참관 제외로 빠질 것으로 추정한 참관 수
+
         "ideal_avg_target_mult": ideal_avg,
         "required_avg_loading": required_avg,
         "multiplier": multiplier,
@@ -1009,7 +1163,11 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
 
     for n in sorted(valid_names, key=lambda x: (res_data[x]['assigned_count']*10)/res_data[x]['avail']):
         rd = res_data[n]; load = (rd['assigned_count']*10)/rd['avail']
-        report.append(f"- **{n} ({rd['year']})**: 세션 {rd['assigned_count']}/{rd['avail']} (로딩 {load:.2f}) | 🩺판정: **{rd['panjung_quota']}** | 💉처치: **{rd['tx_count']}** 예진: **{rd['minor_count'] - rd['tx_count']}**")
+        report.append(
+            f"- **{n} ({rd['year']})**: 세션 {rd['assigned_count']}/{rd['avail']} (로딩 {load:.2f})"
+            f" | 🩺판정: **{rd['panjung_quota']}** | 💉처치+예진: **{rd['minor_count']}**"
+            f" (처치 {rd['tx_count']}/예진 {rd['minor_count'] - rd['tx_count']})"
+        )
     return out_df, assignments, "\n".join(report), res_data
 
 
@@ -1038,7 +1196,8 @@ def run_auto_assignment_multi(df_all, residents, leaves, week_count, start_date,
     weekday_to_idx_main = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4}
 
     def resident_group(r):
-        """0: 의국/교육수석, 1: 학생/진료수석, 2: 일반 R3, 3: R2, 4: R1/R0, -1: 보건소/영상"""
+        """0: 의국/교육수석, 1: 학생/진료수석, 2: 일반 R3, 3: R2,
+        4: 의국처음 (R1/R0 + 태그), 5: R1/R0 태그없음, -1: 보건소/영상"""
         roles = r.get('역할', [])
         if "연건 보건소" in roles: return -1
         if "본원 영상" in roles and rad_days and rad_days.get(r['이름']): return -1
@@ -1048,15 +1207,18 @@ def run_auto_assignment_multi(df_all, residents, leaves, week_count, start_date,
             if "학생수석" in roles or "진료수석" in roles: return 1
             return 2
         if yr == "R2": return 3
-        if yr in ["R1", "R0"]: return 4
+        if yr in ["R1", "R0"]:
+            if "의국 처음" in roles:
+                return 4
+            return 5
         return -1
 
     res_group = {r['이름']: resident_group(r) for r in residents}
 
     def evaluate_result(res_data, out_df, assigns):
         """결과 평가 - 부등호 위반 수 + 미배정 수 + 깨진 pairing 수 + 표준편차 반환"""
-        # 그룹별 로딩 수집
-        group_loads = {0: [], 1: [], 2: [], 3: [], 4: []}
+        # 그룹별 로딩 수집 (6 그룹: 0~5)
+        group_loads = {0: [], 1: [], 2: [], 3: [], 4: [], 5: []}
         all_loads = []
         for name, g in res_group.items():
             if g == -1: continue
@@ -1067,9 +1229,9 @@ def run_auto_assignment_multi(df_all, residents, leaves, week_count, start_date,
             group_loads[g].append(load)
             all_loads.append(load)
 
-        # 부등호 체인 위반 수 (4개 부등호)
+        # 부등호 체인 위반 수 (5개 부등호: 0<1<2<3<4<5)
         chain_violations = 0
-        for i in range(4):
+        for i in range(5):
             left = group_loads[i]
             right = group_loads[i+1]
             if left and right:
@@ -1086,7 +1248,7 @@ def run_auto_assignment_multi(df_all, residents, leaves, week_count, start_date,
             g = res_group[n]
             d = res_data[n]
             if g == 3: r2_pqs.append(d['panjung_quota'])
-            elif g == 4: r1r0_pqs.append(d['panjung_quota'])
+            elif g in (4, 5): r1r0_pqs.append(d['panjung_quota'])
             elif g in [0, 1, 2] and d['panjung_quota'] > 1:
                 pj_violations += 1
         if r2_pqs and r1r0_pqs:

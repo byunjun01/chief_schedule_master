@@ -18,7 +18,7 @@ CP-SAT (OR-Tools) 기반 의국 스케줄 자동 배정 솔버.
   H8c. R3의 판정(H8)과 판정참관(H8b)은 반드시 같은 묶음 (단독 판정/참관 금지)
   H9.  R0 + R1 의국처음 = 처치 X
   H10. 조비룡/박민선 외래 차리/참관, 예진 = R3만
-  H11. Pairing 묶음 = 같은 사람 (건증·박진호 묶음은 절대 안 깸, 그 외 최대 5개까지 깨도 OK)
+  H11. Pairing 묶음 = 같은 사람 (건증·박진호·권혁태 묶음은 절대 안 깸, 그 외 최대 5개까지 깨도 OK)
   H12. 처치(오전), 처치(오후)의 90% 이상 = R3 + R2
   H13. 박진호 통증클리닉 사전 신청자 우선 (신청자 중 1명에게 무조건)
   H14. R1 처치 최대 1개
@@ -99,6 +99,32 @@ def _extract_prof(task_name):
     return None
 
 
+def _extract_prof_category(task_name):
+    """task에서 (교수명, 카테고리) 추출 — S5 중복 그룹화용.
+
+    카테고리 정책 (같은 교수라도 카테고리 다르면 별개 페어):
+    - '외래'와 '암외래' → 같은 카테고리 '외래' (둘 다 받으면 중복)
+    - '건증' (판정/판정참관) → 카테고리 '건증' (외래와 무관)
+    - '통증클리닉' 등 그 외 진료 → 진료명 그대로 (각자 별개)
+    """
+    prof = _extract_prof(task_name)
+    if prof is None:
+        return (None, None)
+    if "건증" in task_name:
+        cat = "건증"
+    elif "암외래" in task_name or "외래" in task_name:
+        cat = "외래"
+    else:
+        # `Pf. {prof} {진료명} ...` 형식에서 진료명 토큰 추출
+        rest = task_name[len("Pf."):].strip()
+        toks = rest.split()
+        if len(toks) >= 2:
+            cat = toks[1].split('(')[0].strip() or "기타"
+        else:
+            cat = "기타"
+    return (prof, cat)
+
+
 def get_resident_target_mult(resident):
     """전공의의 기본 target_mult (사용자 의도 기준 로딩)"""
     year = resident['연차']
@@ -108,8 +134,11 @@ def get_resident_target_mult(resident):
         elif "학생수석" in roles or "진료수석" in roles: return 6.5
         else: return 7.0
     elif year == "R2": return 7.8
-    elif year == "R1": return 8.5
-    else: return 8.5  # R0
+    # R1/R0: '의국 처음' 태그 보유자는 중간 로딩(7.75), 그 외는 8.5
+    if "의국 처음" in roles:
+        return 7.75
+    if year == "R1": return 8.5
+    return 8.5  # R0 태그없음
 
 
 def get_loading_group(resident, rad_days_dict):
@@ -118,7 +147,8 @@ def get_loading_group(resident, rad_days_dict):
     1: 학생/진료수석 R3
     2: 일반 R3 (영상 파견자 제외)
     3: R2 (보건소 제외)
-    4: R1/R0
+    4: 의국처음 (R1/R0 + '의국 처음' 태그)
+    5: R1/R0 태그없음
     -1: 보건소/영상 파견자 (룰 적용 X)
     """
     roles = resident.get('역할', [])
@@ -131,18 +161,48 @@ def get_loading_group(resident, rad_days_dict):
         if "학생수석" in roles or "진료수석" in roles: return 1
         return 2
     if yr == "R2": return 3
-    if yr in ["R1", "R0"]: return 4
+    if yr in ["R1", "R0"]:
+        if "의국 처음" in roles:
+            return 4   # 의국처음 (별도 그룹)
+        return 5       # R1/R0 태그없음
     return -1
 
 
 # 로딩 범위 (target_mult_multiplier 적용 전 기본값)
 # 사용자 정의: 각 그룹 사이 겹치지 않게 정의 → strict < 부등호 자연스럽게 만족
+# 사용자가 UI에서 체크 해제해 '임시로 끌 수 있는' 하드 룰 목록.
+#   (key, 화면에 보일 이름, 설명)
+# ※ H1/H2(한 슬롯 1개·한 task 1명)와 H5(휴가/공휴일 차단)는 스케줄의 기본 전제라 제외했다.
+DISABLEABLE_RULES = [
+    ("H3_bogeonso",      "H3 · 보건소 연보 고정",           "보건소 담당자는 월~금 오전 + 화/목 오후 연보 고정"),
+    ("H4_rad",           "H4 · 영상 파견자 주당 1개",       "영상 파견자는 주당 정확히 1개만 배정"),
+    ("H8_r3_panjung",    "H8 · R3 판정 1개",               "R3(영상 제외)는 일반 판정을 정확히 1개"),
+    ("H8b_r3_obs",       "H8b · R3 판정참관 1개",           "R3는 판정 참관을 정확히 1개"),
+    ("H8c_r3_pair",      "H8c · R3 판정=참관 같은 묶음",     "R3의 판정과 판정참관은 반드시 같은 pair"),
+    ("H9_rookie_no_tx",  "H9 · 의국처음/R0 처치 금지",      "의국 처음인 R1·R0는 처치 배정 안 함"),
+    ("H10_r3_only",      "H10 · 조비룡·박민선 외래/예진 = R3만", "이 룰을 끄면 R2도 받을 수 있음 (화요일 부족 해소용)"),
+    ("H11_pairing",      "H11 · 차리/판정 + 참관 같은 사람", "건증·박진호·권혁태 묶음은 이 룰이 켜져 있으면 절대 안 깸"),
+    ("H12_tx_90",        "H12 · 처치 90% 이상 R3+R2",       "처치(오전/오후)의 90% 이상을 R3·R2가 담당"),
+    ("H13_pain",         "H13 · 통증클리닉 신청자 최소 1개", "신청한 전공의는 통증클리닉을 최소 1개 받음"),
+    ("H14_r1_tx1",       "H14 · R1 처치 최대 1개",          "R1은 처치를 1개까지만"),
+    ("H_tx_balance",     "처치 균등 (연차 내 ±1)",           "R2/R3 각각 처치 수 max-min ≤ 1"),
+    ("H_yejin_balance",  "예진 균등 (연차 내 ±1)",           "R2/R3 각각 예진 수 max-min ≤ 1"),
+    ("H_mkh_thu_r2",     "민경하 건증판정(목) = R2만",       "민경하 목요일 건증 판정은 R2 전용"),
+    ("H15_range",        "H15 · 로딩 범위",                 "그룹별 로딩 하한~상한 (장기휴가자는 자동 예외)"),
+    ("H16_diff",         "H16 · 연차 내 로딩 차이 ≤0.3",     "같은 그룹끼리 로딩 격차 제한"),
+    ("H17_chain",        "H17 · 그룹 간 로딩 부등호",        "수석 < 일반R3 < R2 < R1 순서 강제"),
+    ("H18_panjung",      "H18 · 판정 수 제한",              "R2 최소 3개 / R1·R0 최대(주차+5) / max(R2)<min(R1)"),
+    ("H21_year_diff",    "H21 · 연차 내 판정 수 차이 ≤2",    "같은 연차끼리 판정 개수 격차 제한"),
+    ("H22_bogeonso_mk",  "H22 · 보건소 직전휴가 보충",       "대체된 연보 세션 수만큼 처치(오후) 배정"),
+]
+
 LOADING_RANGES = {
     0: (4.9, 5.5),   # 의국/교육수석
     1: (6.3, 6.8),   # 학생/진료수석
     2: (6.5, 7.2),   # 일반 R3
     3: (7.3, 7.9),   # R2
-    4: (8.0, 9.0),   # R1/R0
+    4: (7.5, 8.0),   # 의국처음 (R1/R0 + 태그)
+    5: (8.0, 9.0),   # R1/R0 태그없음
 }
 
 
@@ -152,12 +212,16 @@ LOADING_RANGES = {
 
 def build_problem_data(df_all, residents, leaves, week_count, start_date, holidays,
                        bogeonso_substitutes=None, rad_days=None, student_practices=None,
-                       pain_applicants=None, shift_allowed_tids=None):
+                       pain_applicants=None, shift_allowed_tids=None,
+                       shift_forbid_date=None):
     """UI 입력을 CP-SAT 모델 입력으로 변환.
-    
+
     shift_allowed_tids: set of task_id.
         그 task가 차리/판정이면 -1 평일 이동 옵션 추가.
         (참관은 절대 고정이므로 set에 있어도 무시)
+    shift_forbid_date: 'MM-DD' 또는 None.
+        지정 시 alt 후보가 이 날짜면 shift 옵션 자체를 없앰.
+        (예: 실제 근무 종료일 다음날 지정 → 그 날로 이전 배치되는 것 방지)
     """
     if bogeonso_substitutes is None: bogeonso_substitutes = {}
     if rad_days is None: rad_days = {}
@@ -169,7 +233,7 @@ def build_problem_data(df_all, residents, leaves, week_count, start_date, holida
 
     def prev_weekday(date_str):
         """주어진 MM-DD의 -1 평일 (월요일 → 직전 금요일). holidays 건너뜀.
-        반환: 'MM-DD' 또는 None (week_count 범위 밖이면)."""
+        반환: 'MM-DD' 또는 None (week_count 범위 밖이거나 shift_forbid_date이면)."""
         try:
             dt = datetime.strptime(f"{start_date.year}-{date_str}", "%Y-%m-%d").date()
         except Exception:
@@ -181,7 +245,11 @@ def build_problem_data(df_all, residents, leaves, week_count, start_date, holida
                 first_date = start_date
                 last_date = start_date + timedelta(days=week_count * 7 - 1)
                 if first_date <= curr <= last_date:
-                    return curr.strftime("%m-%d")
+                    cand = curr.strftime("%m-%d")
+                    # 사용자 지정 shift 금지 날짜면 shift 옵션 자체를 없앰
+                    if shift_forbid_date and cand == shift_forbid_date:
+                        return None
+                    return cand
                 return None
         return None
 
@@ -475,18 +543,48 @@ class CPSATScheduleSolver:
     """
 
     def __init__(self, problem_data, target_mult_multiplier=1.0, loading_ranges=None, h17_ops=None,
-                 max_broken_pairs=5, shortage_shift_tids=None, extra_shift_limit=0):
+                 max_broken_pairs=5, shortage_shift_tids=None, extra_shift_limit=0,
+                 prof_repeat_mode='soft', prof_repeat_cap=None,
+                 residents=None,
+                 skip_panjung_obs=None,
+                 assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None,
+                 longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
         self.data = problem_data
         self.target_mult_multiplier = target_mult_multiplier
-        # 로딩 범위 (그룹 0~4의 (하한, 상한)). None이면 모듈 기본값 LOADING_RANGES 사용.
-        self.loading_ranges = {g: tuple(loading_ranges[g]) for g in range(5)} if loading_ranges else dict(LOADING_RANGES)
-        # H17 부등호: 인접 그룹 경계 0~3의 연산자 ('<', '<=', '='). None이면 모두 '<' (strict).
-        self.h17_ops = dict(h17_ops) if h17_ops else {0: '<', 1: '<', 2: '<', 3: '<'}
-        # H11: 깨도 되는 pairing 최대 개수 (건증/박진호 묶음은 별도로 항상 보호)
+        # 로딩 범위 (그룹 0~5의 (하한, 상한)). None이면 모듈 기본값 LOADING_RANGES 사용.
+        self.loading_ranges = {g: tuple(loading_ranges[g]) for g in range(6)} if loading_ranges else dict(LOADING_RANGES)
+        # H17 부등호: 인접 그룹 경계 0~4의 연산자 ('<', '<=', '='). None이면 모두 '<' (strict).
+        self.h17_ops = dict(h17_ops) if h17_ops else {0: '<', 1: '<', 2: '<', 3: '<', 4: '<'}
+        # H11: 깨도 되는 pairing 최대 개수 (건증/박진호/권혁태 묶음은 별도로 항상 보호)
         self.max_broken_pairs = max_broken_pairs
         # 차리/판정 -1 이동: 슬롯부족(shortage)으로 허용된 task는 무제한, 그 외 추가 이동은 extra_shift_limit개까지
         self.shortage_shift_tids = set(shortage_shift_tids) if shortage_shift_tids else set()
         self.extra_shift_limit = extra_shift_limit
+        # S5 교수 중복: 'soft'(기본, 가중치 1) / 'find_lower_bound'(prof 최우선 lex) / 'capped'(<= cap hard)
+        self.prof_repeat_mode = prof_repeat_mode
+        self.prof_repeat_cap = prof_repeat_cap
+        # 개인용 룰 활성 체크에 쓰이는 residents 원본 (의국수석 역할 식별용)
+        self.residents_raw = residents or []
+        # 건증 판정참관 배정 제외 대상 이름 리스트 (판정은 받지만 pair 참관은 미배정)
+        self.skip_panjung_obs = set(skip_panjung_obs) if skip_panjung_obs else set()
+        # 이전 달에 생성된 참관(orphan) 배정 여부: True=기존처럼 강제 배정, False=배정 안 함(전부 미배정 처리)
+        self.assign_prev_month_obs = bool(assign_prev_month_obs)
+        # 사용자가 UI에서 체크 해제한 하드 룰 key 집합 (DISABLEABLE_RULES 참고)
+        self.disabled_rules = set(disabled_rules or ())
+        # 사용자가 직접 못박은 배정 {task_id: 전공의 이름}
+        # 지정된 task는 그 사람에게 강제 배정되고, H10(R3 전용) 같은 자격 제한은 우회한다.
+        self.manual_pins = dict(manual_pins or {})
+        # 연차별 판정 개수 범위 {'R2':[lo,hi], 'R1':[lo,hi], 'R0':[lo,hi], 'week_max':n}
+        self.panjung_ranges = dict(panjung_ranges or {})
+        # 장기휴가자(가용 절반 이하) 로딩 범위 [lo, hi] — 기본 0.0~9.0
+        _ll = longleave_range or (0.0, 9.0)
+        self.longleave_range = (float(_ll[0]), float(_ll[1]))
+        # 주당 추가 배정: 보건소 담당자에게 처치(오후) 1개 / 영상 파견자에게 예진 1개
+        self.weekly_extra_bogeonso = bool(weekly_extra_bogeonso)
+        self.weekly_extra_rad = bool(weekly_extra_rad)
+        # 이전 달에 생성된 참관(orphan)을 아예 배정하지 않음 (전부 미배정 처리).
+        # assign_prev_month_obs / relax 보다 우선한다.
+        self.drop_prev_month_obs = bool(drop_prev_month_obs)
         self.model = cp_model.CpModel()
         self.tasks = problem_data['tasks']
         self.persons = problem_data['persons']
@@ -651,10 +749,11 @@ class CPSATScheduleSolver:
         for p in self.persons:
             if p['is_bogeonso']:
                 pname = p['name']
-                allow_tx_pm = makeup.get(pname, 0) > 0
+                # 처치(오후)를 열어주는 경우: H22 보충 대상이거나, 주당 1개 추가 옵션이 켜진 경우
+                allow_tx_pm = (makeup.get(pname, 0) > 0) or self.weekly_extra_bogeonso
                 for t in self.tasks:
                     if allow_tx_pm and t['task'] == '처치 (오후)':
-                        continue  # H22가 처치(오후)를 정확히 N개로 배정
+                        continue  # H22 / 주당 추가 옵션이 처치(오후) 개수를 통제
                     self.model.Add(self.x[(t['task_id'], pname)] == 0)
 
     # ----- H4: 영상 파견자 -----
@@ -671,14 +770,22 @@ class CPSATScheduleSolver:
                 continue
             pname = p['name']
 
+            # 주당 예진 1개 추가 옵션이 켜지면, 예진은 H4의 '주당 1개' 계산에서 빼고 따로 강제한다
+            _sep_yejin = self.weekly_extra_rad
+
             # 주차별 분류
             clinic_tasks_by_week = {}  # {week: [tid, ...]}
             tx_yejin_tasks_by_week = {}  # {week: [tid, ...]}
+            yejin_tasks_by_week = {}     # {week: [task, ...]} — 추가 옵션용
             for t in self.tasks:
                 w = t['week']
                 if _is_clinic_panjung_chari(t['task']):
                     clinic_tasks_by_week.setdefault(w, []).append(t)
-                elif _is_tx_task(t['task']) or "예진" in t['task']:
+                elif "예진" in t['task']:
+                    yejin_tasks_by_week.setdefault(w, []).append(t)
+                    if not _sep_yejin:
+                        tx_yejin_tasks_by_week.setdefault(w, []).append(t)
+                elif _is_tx_task(t['task']):
                     tx_yejin_tasks_by_week.setdefault(w, []).append(t)
 
             # 모든 주차 확보 (range)
@@ -714,6 +821,7 @@ class CPSATScheduleSolver:
                     for t in self.tasks:
                         if t['week'] != w: continue
                         if t['task_id'] in clinic_tids_set: continue
+                        if _sep_yejin and "예진" in t['task']: continue  # 예진은 아래에서 따로 강제
                         self.model.Add(self.x[(t['task_id'], pname)] == 0)
                 else:
                     # 클리닉 못 받음 → 처치/예진 중 정확히 1개
@@ -727,11 +835,28 @@ class CPSATScheduleSolver:
                         for t in self.tasks:
                             if t['week'] != w: continue
                             if t['task_id'] in receivable_tids: continue
+                            if _sep_yejin and "예진" in t['task']: continue  # 예진은 아래에서 따로 강제
                             self.model.Add(self.x[(t['task_id'], pname)] == 0)
                     else:
                         # 클리닉도 처치/예진도 못 받는 주 → 어떤 task도 못 받음
                         for t in self.tasks:
                             if t['week'] != w: continue
+                            if _sep_yejin and "예진" in t['task']: continue  # 예진은 아래에서 따로 강제
+                            self.model.Add(self.x[(t['task_id'], pname)] == 0)
+
+            # (옵션) 영상 파견자에게 주당 예진 1개 추가 배정
+            if _sep_yejin:
+                for w in sorted(all_weeks):
+                    yj_in_w = yejin_tasks_by_week.get(w, [])
+                    rec_yj = [t for t in yj_in_w if can_receive(t)]
+                    if rec_yj:
+                        self.model.Add(
+                            sum(self.x[(t['task_id'], pname)] for t in rec_yj) == 1
+                        )
+                    # 받을 수 없는 예진은 0
+                    rec_ids = set(t['task_id'] for t in rec_yj)
+                    for t in yj_in_w:
+                        if t['task_id'] not in rec_ids:
                             self.model.Add(self.x[(t['task_id'], pname)] == 0)
 
         # 클리닉 차리/판정는 영상 파견자 또는 R2만 받음 (그 외 hard 제외)
@@ -766,6 +891,8 @@ class CPSATScheduleSolver:
     def add_h8b_r3_panjung_obs(self):
         """
         H8b: R3 (영상 파견자 제외) 판정 참관 = 정확히 1개
+          단, 판정참관 제외 대상 R3는 짝의 참관이 드롭되어 0개가 될 수 있으므로 상한만 건다(≤1).
+          (어느 묶음의 참관을 받는지는 H8c가 계속 통제하므로 ≤1로 느슨하게 해도 흐트러지지 않음)
         """
         panjung_obs_task_ids = [t['task_id'] for t in self.tasks
                                 if _is_panjung_obs_task(t['task'])]
@@ -773,7 +900,11 @@ class CPSATScheduleSolver:
             if p['year'] != 'R3' or p['is_rad']:
                 continue
             pname = p['name']
-            self.model.Add(sum(self.x[(tid, pname)] for tid in panjung_obs_task_ids) == 1)
+            obs_sum = sum(self.x[(tid, pname)] for tid in panjung_obs_task_ids)
+            if pname in self.skip_panjung_obs:
+                self.model.Add(obs_sum <= 1)
+            else:
+                self.model.Add(obs_sum == 1)
 
     # ----- H8c: R3의 판정과 판정참관은 반드시 같은 묶음(pair) -----
     def add_h8c_r3_panjung_pair(self):
@@ -806,19 +937,33 @@ class CPSATScheduleSolver:
             if pid not in full_pairs:
                 orphan_tids.extend(tids)
 
+        # 참관이 드롭될 수 있는 묶음 = 건증 묶음(참관 1개짜리). 제외 대상 R3에게만 예외를 준다.
+        geon_pairs = set()
+        for pid in full_pairs:
+            if len(pair_ob[pid]) != 1:
+                continue
+            names = [self.task_by_id[t]['task'] for t in (pair_pj[pid] + pair_ob[pid])]
+            if any("건증" in n for n in names):
+                geon_pairs.add(pid)
+
         for p in self.persons:
             if p['year'] != 'R3' or p['is_rad']:
                 continue
             pname = p['name']
+            is_skip = pname in self.skip_panjung_obs
             # 단독 판정/참관 금지
             for tid in orphan_tids:
                 self.model.Add(self.x[(tid, pname)] == 0)
             # 같은 묶음 안에서 판정 수 == 참관 수
             for pid in full_pairs:
-                self.model.Add(
-                    sum(self.x[(tid, pname)] for tid in pair_pj[pid])
-                    == sum(self.x[(tid, pname)] for tid in pair_ob[pid])
-                )
+                pj_sum = sum(self.x[(tid, pname)] for tid in pair_pj[pid])
+                ob_sum = sum(self.x[(tid, pname)] for tid in pair_ob[pid])
+                if is_skip and pid in geon_pairs:
+                    # 제외 대상: 참관이 드롭된 묶음은 (판정 1 / 참관 0)을 허용해야 하므로
+                    # 등식은 '참관이 살아있을 때'만 강제한다.
+                    self.model.Add(pj_sum == ob_sum).OnlyEnforceIf(self.u[pair_ob[pid][0]].Not())
+                else:
+                    self.model.Add(pj_sum == ob_sum)
 
     # ----- H9: R0/의국처음 처치 X -----
     def add_h9_rookie_no_tx(self):
@@ -832,8 +977,10 @@ class CPSATScheduleSolver:
 
     # ----- H10: R3 전용 task -----
     def add_h10_r3_only(self):
-        """조비룡/박민선 외래 차리/참관, 예진 = R3만"""
-        r3_only_task_ids = [t['task_id'] for t in self.tasks if _is_r3_only_task(t['task'])]
+        """조비룡/박민선 외래 차리/참관, 예진 = R3만
+        단, 사용자가 직접 지정(핀)한 task는 예외 — 그 칸은 지정한 사람(R2 등)이 받는다."""
+        r3_only_task_ids = [t['task_id'] for t in self.tasks
+                            if _is_r3_only_task(t['task']) and t['task_id'] not in self.manual_pins]
         for p in self.persons:
             if p['year'] == 'R3':
                 continue
@@ -841,11 +988,20 @@ class CPSATScheduleSolver:
             for tid in r3_only_task_ids:
                 self.model.Add(self.x[(tid, pname)] == 0)
 
+    # ----- 사용자 직접 지정(핀) -----
+    def add_manual_pins(self):
+        """사용자가 '이 날 이 업무는 이 사람'으로 못박은 배정을 강제한다.
+        (부족한 날짜에 예외적으로 R2를 넣는 용도. 자격 제한 룰은 위에서 이미 우회됨)"""
+        names = {p['name'] for p in self.persons}
+        for tid, pname in self.manual_pins.items():
+            if pname in names and (tid, pname) in self.x:
+                self.model.Add(self.x[(tid, pname)] == 1)
+
     # ----- H11: Pairing (건증 묶음 제외 최대 5개 깨도 OK) -----
     def add_h11_pairing(self):
         """
         H11: 같은 pair_id의 task는 같은 사람에게.
-          - 건증 묶음(건증 판정 + 판정 참관) 및 박진호 묶음(외래/통증클리닉)은 절대 분리 안 함 (broken = 0 강제)
+          - 건증 묶음(건증 판정 + 판정 참관), 박진호 묶음(외래/통증클리닉), 권혁태 묶음(외래)은 절대 분리 안 함 (broken = 0 강제)
           - 그 외 묶음은 최대 5개까지 깨도 OK (Σ broken_pair ≤ 5)
         구현:
           - 각 pair_id의 task들에 대해 broken_pair 변수 생성
@@ -860,13 +1016,44 @@ class CPSATScheduleSolver:
         for pid, tids in pair_groups.items():
             if len(tids) < 2:
                 continue
+            pair_task_names = [self.task_by_id[tid]['task'] for tid in tids]
+            is_geonjeung = any("건증" in tn for tn in pair_task_names)
+
+            # 건증 pair + skip 대상자 존재 시 특수 처리:
+            #   판정을 skip 대상자가 받으면 → pair의 참관은 미배정(u=1)
+            #   참관이 배정된 경우만 pair 일치(판정=참관 같은 사람) 강제
+            if is_geonjeung and self.skip_panjung_obs:
+                judge_tid = next(
+                    (tid for tid in tids
+                     if "판정" in self.task_by_id[tid]['task']
+                     and "참관" not in self.task_by_id[tid]['task']),
+                    None,
+                )
+                obs_tid = next(
+                    (tid for tid in tids
+                     if "판정" in self.task_by_id[tid]['task']
+                     and "참관" in self.task_by_id[tid]['task']),
+                    None,
+                )
+                if judge_tid is not None and obs_tid is not None:
+                    for s in self.skip_panjung_obs:
+                        if s in self.person_by_name:
+                            self.model.Add(self.u[obs_tid] >= self.x[(judge_tid, s)])
+                    obs_present = self.u[obs_tid].Not()
+                    for p in self.persons:
+                        pname = p['name']
+                        self.model.Add(
+                            self.x[(judge_tid, pname)] == self.x[(obs_tid, pname)]
+                        ).OnlyEnforceIf(obs_present)
+                    continue
+
             bp = self.model.NewBoolVar(f"broken_{pid}")
             self.broken_pair[pid] = bp
             # 절대 분리 금지 묶음 → broken = 0 강제 (≤5 캡과 무관하게 항상 유지)
             #   - 건증 묶음 (건증 판정 + 판정 참관)
             #   - 박진호 묶음 (외래/통증클리닉 차리 + 참관)
-            pair_task_names = [self.task_by_id[tid]['task'] for tid in tids]
-            no_break = any(("건증" in tn or "박진호" in tn) for tn in pair_task_names)
+            #   - 권혁태 묶음 (외래 차리 + 참관)
+            no_break = any(("건증" in tn or "박진호" in tn or "권혁태" in tn) for tn in pair_task_names)
             if no_break:
                 self.model.Add(bp == 0)
             # 묶음의 모든 task가 같은 사람 → broken = 0
@@ -893,7 +1080,7 @@ class CPSATScheduleSolver:
                     # diff implies bp
                     self.model.Add(bp >= diff)
 
-        # 총 깨진 묶음 ≤ max_broken_pairs (건증/박진호 묶음은 위에서 broken=0 강제라 합산에서 0)
+        # 총 깨진 묶음 ≤ max_broken_pairs (건증/박진호/권혁태 묶음은 위에서 broken=0 강제라 합산에서 0)
         if self.broken_pair:
             self.model.Add(sum(self.broken_pair.values()) <= self.max_broken_pairs)
 
@@ -950,39 +1137,65 @@ class CPSATScheduleSolver:
             self.model.Add(sum(self.x[(tid, pname)] for tid in tx_task_ids) <= 1)
 
     # ----- H_TX_YEJIN: 처치+예진 합 R2+R3 풀에서 max-min ≤ 2 -----
-    def add_h_tx_yejin_balance(self):
-        """
-        처치(오전), 처치(오후), 예진 task 모두 합산.
-        R2 + R3 (영상/보건소 제외) 전체 풀에서 한 사람의 합 max-min ≤ 2.
-        R1/R0은 풀에 포함 안 됨.
-        """
-        tx_yejin_task_ids = [t['task_id'] for t in self.tasks
-                             if _is_tx_task(t['task']) or "예진" in t['task']]
-        if not tx_yejin_task_ids:
+    def _add_year_balance(self, task_ids, label, max_diff=1):
+        """task_ids 안에서 R2 연차 내 / R3 연차 내 각각 max-min ≤ max_diff.
+        R2와 R3는 별개로 균등화 (서로 연차 다르면 차이 허용)."""
+        if not task_ids:
             return
+        for year in ('R2', 'R3'):
+            pool = [p for p in self.persons
+                    if p['year'] == year
+                    and not p['is_bogeonso']
+                    and not p['is_rad']]
+            if len(pool) < 2:
+                continue
+            person_cnt = {}
+            for p in pool:
+                cnt = self.model.NewIntVar(0, len(task_ids), f"{label}_{year}_{p['name']}")
+                self.model.Add(cnt == sum(self.x[(tid, p['name'])] for tid in task_ids))
+                person_cnt[p['name']] = cnt
+            names = list(person_cnt.keys())
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    a, b = person_cnt[names[i]], person_cnt[names[j]]
+                    self.model.Add(a - b <= max_diff)
+                    self.model.Add(b - a <= max_diff)
 
-        pool_persons = [p for p in self.persons
-                        if p['year'] in ['R2', 'R3']
-                        and not p['is_bogeonso']
-                        and not p['is_rad']]
-        if len(pool_persons) < 2:
+    def add_h_tx_balance(self):
+        """처치(오전/오후) task만. R2 내 / R3 내 각각 max-min ≤ 1.
+        R1/R0은 풀에서 제외."""
+        tx_task_ids = [t['task_id'] for t in self.tasks if _is_tx_task(t['task'])]
+        self._add_year_balance(tx_task_ids, "tx", max_diff=1)
+
+    def add_h_yejin_balance(self):
+        """예진 task만. R2 내 / R3 내 각각 max-min ≤ 1.
+        R1/R0은 풀에서 제외."""
+        ye_task_ids = [t['task_id'] for t in self.tasks if "예진" in t['task']]
+        self._add_year_balance(ye_task_ids, "ye", max_diff=1)
+
+    def add_h_minkyeongha_geonjeung_thu_r2_only(self):
+        """민경하 건증판정 task 중 '목요일'에 잡힌 것은 R2만 받을 수 있다 (R3/R1/R0 차단)."""
+        try:
+            from datetime import datetime
+        except Exception:
             return
-
-        # 각 사람의 처치+예진 합 변수
-        person_tx_yejin = {}
-        for p in pool_persons:
-            cnt = self.model.NewIntVar(0, len(tx_yejin_task_ids), f"txy_{p['name']}")
-            self.model.Add(cnt == sum(self.x[(tid, p['name'])] for tid in tx_yejin_task_ids))
-            person_tx_yejin[p['name']] = cnt
-
-        # max-min ≤ 2 ⟺ 모든 (i, j) 쌍에 대해 |cnt_i - cnt_j| ≤ 2
-        names = list(person_tx_yejin.keys())
-        for i in range(len(names)):
-            for j in range(i + 1, len(names)):
-                a = person_tx_yejin[names[i]]
-                b = person_tx_yejin[names[j]]
-                self.model.Add(a - b <= 2)
-                self.model.Add(b - a <= 2)
+        target_tids = []
+        for t in self.tasks:
+            tn = t['task']
+            if "민경하" not in tn or "건증" not in tn or "판정" not in tn:
+                continue
+            try:
+                wd = datetime.strptime(t['date'], "%Y-%m-%d").weekday()
+            except Exception:
+                continue
+            if wd == 3:  # 목요일
+                target_tids.append(t['task_id'])
+        if not target_tids:
+            return
+        for p in self.persons:
+            if p['year'] != 'R2':
+                for tid in target_tids:
+                    self.model.Add(self.x[(tid, p['name'])] == 0)
 
     # ----- H15, H16, H17: 로딩 -----
     def add_h15_h16_h17_loading(self):
@@ -1014,14 +1227,14 @@ class CPSATScheduleSolver:
         # ----- '=' 로 연결된 인접 그룹은 한 클러스터로 병합 -----
         # ops[g]가 '='면 그룹 g와 g+1을 같은 클러스터로 취급 (한 그룹처럼).
         cluster_of = {0: 0}
-        for g in range(1, 5):
+        for g in range(1, 6):
             if ops.get(g - 1) == '=':
                 cluster_of[g] = cluster_of[g - 1]
             else:
                 cluster_of[g] = cluster_of[g - 1] + 1
         # 클러스터별 통합 로딩 범위 = (병합된 그룹들의 min 하한, max 상한)
         cluster_range = {}
-        for g in range(5):
+        for g in range(6):
             c = cluster_of[g]
             lo, hi = ranges[g]
             if c not in cluster_range:
@@ -1030,6 +1243,21 @@ class CPSATScheduleSolver:
                 cluster_range[c][0] = min(cluster_range[c][0], lo)
                 cluster_range[c][1] = max(cluster_range[c][1], hi)
 
+        # === 장기휴가자 로딩 예외 ===
+        # 근무 가능 세션이 '절반 이하'인 사람(= 휴가가 절반 이상)은 로딩 제약을 사실상 풀어준다.
+        #   - H15: 그룹 범위 대신 0.0 ~ 9.0 (배율 무관) — 남은 일정에 최대한 채워넣을 수 있게
+        #   - H16(연차 내 차이 ≤0.3), H17(그룹 간 부등호): 아예 제외
+        # 남은 며칠에 남들과 같은 로딩 '비율'을 맞추라고 강요하면 해가 사라지기 때문.
+        # ※ 로딩 외의 룰(pairing·판정 수·처치 비율 등)은 이 사람에게도 그대로 적용된다.
+        LONGLEAVE_RANGE = self.longleave_range   # 사용자 설정 (기본 0.0~9.0)
+        _avails = [self.person_avail_sessions[p['name']] for p in self.persons if p['group'] != -1]
+        _full = max(_avails) if _avails else 0
+        self.loading_exempt = {
+            p['name'] for p in self.persons
+            if p['group'] != -1 and _full > 0
+            and self.person_avail_sessions[p['name']] * 2 <= _full
+        }
+
         # H15: 각 사람의 로딩을 자기 클러스터 범위 [lo, hi] (배율 적용) → count 범위로 환산
         # 단, R3 영상은 그룹 -1로 제외됨
         for p in self.persons:
@@ -1037,15 +1265,20 @@ class CPSATScheduleSolver:
                 continue
             pname = p['name']
             avail = self.person_avail_sessions[pname]
-            lo_load, hi_load = cluster_range[cluster_of[p['group']]]
-            # 배율(MULT)은 '최대값'만 키움 — 최소값은 그대로 두어 범위를 위로만 확장
-            hi_load *= MULT
+            if pname in self.loading_exempt:
+                # 장기휴가자: 0~9 범위만 적용 (배율 미적용)
+                lo_load, hi_load = LONGLEAVE_RANGE
+            else:
+                lo_load, hi_load = cluster_range[cluster_of[p['group']]]
+                # 배율(MULT)은 '최대값'만 키움 — 최소값은 그대로 두어 범위를 위로만 확장
+                hi_load *= MULT
             # 하한은 올림(ceil)해야 loading >= lo_load 보장
             count_lo = math.ceil(lo_load * avail / 10)
             # 상한은 내림(floor)해야 loading <= hi_load 보장
             count_hi = math.floor(hi_load * avail / 10)
-            self.model.Add(person_assigned[pname] >= count_lo)
-            self.model.Add(person_assigned[pname] <= count_hi)
+            if self._rule_on("H15_range"):
+                self.model.Add(person_assigned[pname] >= count_lo)
+                self.model.Add(person_assigned[pname] <= count_hi)
 
         # H16: 같은 클러스터 내 두 사람의 로딩 차이 ≤ 0.3 × MULT
         #   |count1/avail1 - count2/avail2| ≤ 0.03 (로딩 단위 0.3 → 분자 10배 → 3)
@@ -1057,27 +1290,34 @@ class CPSATScheduleSolver:
                 clusters.setdefault(cluster_of[p['group']], []).append(p['name'])
 
         for c, names in clusters.items():
+            if not self._rule_on("H16_diff"):
+                break
             if len(names) < 2:
                 continue
             for i in range(len(names)):
                 for j in range(i + 1, len(names)):
                     n1, n2 = names[i], names[j]
+                    # 장기휴가자는 이 차이 제약에서 제외
+                    if n1 in self.loading_exempt or n2 in self.loading_exempt:
+                        continue
                     a1 = self.person_avail_sessions[n1]
                     a2 = self.person_avail_sessions[n2]
                     limit = int(DIFF_LIMIT * a1 * a2)
                     self.model.Add(person_assigned[n1] * a2 * 10 - person_assigned[n2] * a1 * 10 <= limit)
                     self.model.Add(person_assigned[n2] * a1 * 10 - person_assigned[n1] * a2 * 10 <= limit)
 
-        # H17: 인접 그룹 부등호 (경계 g = 0..3)
+        # H17: 인접 그룹 부등호 (경계 g = 0..4)
         #   '<'  strict   : count_low × a_high × 10 + 1 ≤ count_high × a_low × 10
         #   '<=' non-strict: count_low × a_high × 10     ≤ count_high × a_low × 10
         #   '='  병합       : 부등호 없음 (H15 범위 + H16 차이로 한 그룹 처리)
-        groups = {0: [], 1: [], 2: [], 3: [], 4: []}
+        groups = {0: [], 1: [], 2: [], 3: [], 4: [], 5: []}
         for p in self.persons:
             if p['group'] != -1:
                 groups[p['group']].append(p['name'])
 
-        for g in range(4):
+        for g in range(5):
+            if not self._rule_on("H17_chain"):
+                break
             op = ops.get(g, '<')
             if op == '=':
                 continue  # 병합 — 위 H15/H16에서 한 클러스터로 처리됨
@@ -1086,6 +1326,9 @@ class CPSATScheduleSolver:
                 continue
             for n_low in groups[g]:
                 for n_high in groups[higher_g]:
+                    # 장기휴가자는 그룹 간 부등호에서도 제외 (0~9 범위만 적용)
+                    if n_low in self.loading_exempt or n_high in self.loading_exempt:
+                        continue
                     a_low = self.person_avail_sessions[n_low]
                     a_high = self.person_avail_sessions[n_high]
                     if op == '<':
@@ -1116,15 +1359,26 @@ class CPSATScheduleSolver:
             if _is_panjung_task(t['task']) and not _is_clinic_panjung_chari(t['task']):
                 panjung_task_ids_by_week.setdefault(t['week'], []).append(t['task_id'])
 
+        # 사용자 설정 (없으면 기존 기본값): {'R2':[lo,hi], 'R1':[lo,hi], 'R0':[lo,hi], 'week_max':3}
+        _pj = self.panjung_ranges or {}
+        _wc = self.data['week_count']
+        _def = {'R2': [3, len(self.tasks)], 'R1': [0, _wc + 5], 'R0': [0, _wc + 5]}
+
+        def _rng(year):
+            v = _pj.get(year)
+            if not v or len(v) < 2:
+                return _def[year][0], _def[year][1]
+            return int(v[0]), int(v[1])
+
+        _week_max = int(_pj.get('week_max', 3) or 3)
+
         # 주당 max
         for p in self.persons:
             if p['group'] == -1:
                 continue
             pname = p['name']
-            if p['year'] in ['R1', 'R0']:
-                max_per_week = 3
-            elif p['year'] == 'R2':
-                max_per_week = 3
+            if p['year'] in ['R1', 'R0', 'R2']:
+                max_per_week = _week_max
             else:
                 continue  # R3는 H8에서 총 1개로 제한
             for w, tids in panjung_task_ids_by_week.items():
@@ -1137,27 +1391,35 @@ class CPSATScheduleSolver:
             return
 
         r2_persons = [p for p in self.persons if p['group'] == 3]
-        r1r0_persons = [p for p in self.persons if p['group'] == 4]
+        # R1/R0 전체 (의국처음=4 + 태그없음=5)
+        r1r0_persons = [p for p in self.persons if p['group'] in (4, 5)]
 
-        # R2 총 판정 카운트 변수
+        # R2 총 판정 카운트 변수 (범위: 사용자 설정)
+        _r2_lo, _r2_hi = _rng('R2')
         r2_panjung = {}
         for p in r2_persons:
             var = self.model.NewIntVar(0, len(all_panjung_tids), f"r2pj_{p['name']}")
             self.model.Add(var == sum(self.x[(tid, p['name'])] for tid in all_panjung_tids))
             r2_panjung[p['name']] = var
-            # 신규: R2 최소 판정 3개
-            self.model.Add(var >= 3)
+            self.model.Add(var >= _r2_lo)
+            self.model.Add(var <= _r2_hi)
 
-        # R1/R0 총 판정 카운트 변수
+        # R1/R0 총 판정 카운트 변수 (범위: 연차별 사용자 설정)
         r1r0_panjung = {}
-        # 신규: R1/R0 최대 판정 = week_count + 5
-        r1r0_max_total = self.data['week_count'] + 5
         for p in r1r0_persons:
+            _lo, _hi = _rng(p['year'] if p['year'] in ('R1', 'R0') else 'R1')
             var = self.model.NewIntVar(0, len(all_panjung_tids), f"r1pj_{p['name']}")
             self.model.Add(var == sum(self.x[(tid, p['name'])] for tid in all_panjung_tids))
             r1r0_panjung[p['name']] = var
-            # 신규: 최대 한도
-            self.model.Add(var <= r1r0_max_total)
+            self.model.Add(var >= _lo)
+            self.model.Add(var <= _hi)
+
+        # 의국처음(group 4)은 다른 R1/R0(group 5, 태그없음)보다 판정 개수 적게 (<=, 사용자 지정)
+        g4_rookie = [p['name'] for p in r1r0_persons if p['group'] == 4]
+        g5_regular = [p['name'] for p in r1r0_persons if p['group'] == 5]
+        for n4 in g4_rookie:
+            for n5 in g5_regular:
+                self.model.Add(r1r0_panjung[n4] <= r1r0_panjung[n5])
 
         # 부등호 strict <: max(R2) < min(R1/R0)
         if r2_panjung and r1r0_panjung:
@@ -1233,10 +1495,30 @@ class CPSATScheduleSolver:
              그 담당자에게 처치(오후)를 정확히 N개 배정.
         """
         makeup = self.data.get('bogeonso_jikjeon_makeup', {})
-        if not makeup:
-            return
         tx_pm_tids = [t['task_id'] for t in self.tasks if t['task'] == '처치 (오후)']
         if not tx_pm_tids:
+            return
+
+        if self.weekly_extra_bogeonso:
+            # 주당 처치(오후) 1개 추가 옵션 ON:
+            #   보건소 담당자 전원에게 '매주 최소 1개' + 총합 = 주차수 + 직전휴가 보충분(N)
+            tx_pm_by_week = {}
+            for t in self.tasks:
+                if t['task'] == '처치 (오후)':
+                    tx_pm_by_week.setdefault(t['week'], []).append(t['task_id'])
+            n_weeks = len(tx_pm_by_week)
+            for p in self.persons:
+                if not p['is_bogeonso']:
+                    continue
+                name = p['name']
+                for w, tids in tx_pm_by_week.items():
+                    self.model.Add(sum(self.x[(tid, name)] for tid in tids) >= 1)
+                self.model.Add(
+                    sum(self.x[(tid, name)] for tid in tx_pm_tids) == n_weeks + int(makeup.get(name, 0))
+                )
+            return
+
+        if not makeup:
             return
         for name, n in makeup.items():
             self.model.Add(sum(self.x[(tid, name)] for tid in tx_pm_tids) == n)
@@ -1250,14 +1532,62 @@ class CPSATScheduleSolver:
           3. 차리/판정 날짜 이동 최소화 (date_alt 사용)
           4. 교수 중복 최소화 (S5)
         """
-        # 가중치 우선순위: 미배정 >>> 깨진 pair >>> 이동 >>> 교수 중복
+        # 가중치 우선순위: 미배정 >>> 깨진 pair >>> 이동 >>> 비제외 R2/R3 판정 >>> 교수 중복
         UNASSIGNED_PENALTY = 1000000
         BROKEN_PAIR_PENALTY = 10000
         SHIFT_PENALTY = 100
+        NONSKIP_PANJUNG_PENALTY = 10
         PROF_REPEAT_PENALTY = 1
 
-        unassigned_term = sum(self.u[t['task_id']] for t in self.tasks) * UNASSIGNED_PENALTY
+        # '이전 달에 생성된 참관'(orphan = 짝 차리/판정이 이번 달 밖):
+        #   (요구1) 참관 미배정 대상(skip_panjung_obs)에겐 orphan 참관 절대 배정 안 함 (hard, 모드 무관).
+        #   (요구2) 배정 여부는 사용자 토글:
+        #       - assign_prev_month_obs=True  → 일반 task와 동일하게 강제 배정 (풀 페널티 1e6)
+        #       - assign_prev_month_obs=False → 미배정 페널티를 아주 작게 → '가능하면 배정, 아니면 드롭'.
+        #         전부 드롭이 아니라, 다른 배정을 방해하지 않는 선에서 붙고 남는 건 미배정(별도 집계).
+        ORPHAN_SMALL_PENALTY = 20   # 배정 안 함 모드의 orphan 미배정 페널티 (아주 작게)
+        orphan_tids = self._orphan_obs_tids()
+        # (요구1) skip 대상은 orphan 참관 배정 금지
+        for tid in orphan_tids:
+            for nm in self.skip_panjung_obs:
+                if nm in self.person_by_name:
+                    self.model.Add(self.x[(tid, nm)] == 0)
+        # (요구2) 모드별 미배정 페널티
+        #   drop_prev_month_obs=True → 아예 배정 안 함 (누구에게도 배정 금지, 전부 미배정 처리)
+        self._orphan_obs = set()
+        orphan_pen_term = 0
+        if self.drop_prev_month_obs:
+            self._orphan_obs = orphan_tids   # 전부 미배정 → 페널티 면제 + 별도 집계
+            for tid in orphan_tids:
+                for p in self.persons:
+                    key = (tid, p['name'])
+                    if key in self.x:
+                        self.model.Add(self.x[key] == 0)
+        elif not self.assign_prev_month_obs:
+            self._orphan_obs = orphan_tids   # 미배정 페널티 면제(대신 작은 페널티) + 드롭 시 별도 집계 대상
+            if orphan_tids:
+                orphan_pen_term = sum(self.u[tid] for tid in orphan_tids) * ORPHAN_SMALL_PENALTY
+        unassigned_term = sum(self.u[t['task_id']] for t in self.tasks
+                              if t['task_id'] not in self._orphan_obs) * UNASSIGNED_PENALTY + orphan_pen_term
         broken_term = sum(self.broken_pair.values()) * BROKEN_PAIR_PENALTY if self.broken_pair else 0
+
+        # 판정참관 제외 대상이 아닌 R2/R3의 일반 판정 수를 최소화 (soft, skip 기능 사용 시에만).
+        #   이유: 제외 대상이 건증 판정을 받으면 참관이 드롭돼 1세션이지만,
+        #         비제외자가 받으면 참관까지 유지(H11 pairing)돼 2세션이라 부하가 2배.
+        #         → 판정을 제외 대상 쪽으로 몰고, 비제외 R2/R3에겐 룰이 허용하는 최소만 부여.
+        #   R1/R0은 대상 아님(사용자 지정). R3는 H8로 이미 1개 고정이라 사실상 R2에만 작용.
+        nonskip_panjung_term = 0
+        if self.skip_panjung_obs:
+            _pj_tids = [t['task_id'] for t in self.tasks
+                        if _is_panjung_task(t['task']) and not _is_clinic_panjung_chari(t['task'])]
+            _nonskip_names = [p['name'] for p in self.persons
+                              if p['group'] != -1
+                              and p['year'] in ('R2', 'R3')
+                              and p['name'] not in self.skip_panjung_obs]
+            if _pj_tids and _nonskip_names:
+                nonskip_panjung_term = sum(
+                    self.x[(tid, nm)] for tid in _pj_tids for nm in _nonskip_names
+                ) * NONSKIP_PANJUNG_PENALTY
 
         # 이동 페널티: date_var == 0 (alt 날짜 사용)이면 페널티
         # 단 task가 미배정이면 이동 없음 (페널티 0)
@@ -1279,52 +1609,156 @@ class CPSATScheduleSolver:
                 shift_vars.append(shift_ind)
             shift_term = sum(shift_vars) * SHIFT_PENALTY
 
-        # S5: 같은 교수의 task를 한 사람이 여러 개 받으면 페널티
-        prof_repeat_vars = []
+        # S5 (이차 정의 + 카테고리 분리 + 임계치 가변):
+        # 한 사람이 같은 (교수, 카테고리)에서 task를 k번 받았을 때 excess = max(0, k - thr)
+        # 점수 = excess². 임계치 thr 정책:
+        #   - 일반: thr=3 → 4회+부터 카운트 (4회=1, 5회=4, 6회=9 ...)
+        # 카테고리:
+        #   - 외래/암외래 통합('외래') / 건증 별개 / 통증클리닉 등 각자 별개
+        excess_sq_vars = []
+        excess_by_key = {}     # (person, prof, category) → excess IntVar
+        threshold_by_key = {}  # (person, prof, category) → 적용된 thr (결과 추출용)
         person_prof_tasks = {}
         for t in self.tasks:
-            prof = _extract_prof(t['task'])
+            prof, cat = _extract_prof_category(t['task'])
             if prof is None:
                 continue
             for p in self.persons:
-                key = (p['name'], prof)
+                key = (p['name'], prof, cat)
                 person_prof_tasks.setdefault(key, []).append(t['task_id'])
 
-        for (pname, prof), tids in person_prof_tasks.items():
-            count = self.model.NewIntVar(0, len(tids), f"profcount_{pname}_{prof}")
+        max_count_global = 0
+        for (pname, prof, cat), tids in person_prof_tasks.items():
+            n_tids = len(tids)
+            # 임계치: thr=3 (4회+부터 점수 카운트)
+            thr = 3
+            threshold_by_key[(pname, prof, cat)] = thr
+
+            safe_name = f"{pname}_{prof}_{cat}".replace(' ', '_')
+            count = self.model.NewIntVar(0, n_tids, f"profcount_{safe_name}")
             self.model.Add(count == sum(self.x[(tid, pname)] for tid in tids))
-            excess = self.model.NewIntVar(0, len(tids), f"profexcess_{pname}_{prof}")
-            self.model.AddMaxEquality(excess, [count - 1, self.model.NewConstant(0)])
-            prof_repeat_vars.append(excess)
 
-        prof_term = sum(prof_repeat_vars) * PROF_REPEAT_PENALTY if prof_repeat_vars else 0
+            if prof == "민경하":
+                self.model.Add(count <= 2)
 
-        self.model.Minimize(unassigned_term + broken_term + shift_term + prof_term)
+            ex_ub = max(0, n_tids - thr)
+            excess = self.model.NewIntVar(0, ex_ub, f"profexcess_{safe_name}")
+            self.model.AddMaxEquality(excess, [count - thr, self.model.NewConstant(0)])
+            excess_sq = self.model.NewIntVar(0, ex_ub * ex_ub, f"profexsq_{safe_name}")
+            self.model.AddMultiplicationEquality(excess_sq, [excess, excess])
+            excess_sq_vars.append(excess_sq)
+            excess_by_key[(pname, prof, cat)] = excess
+            if ex_ub * ex_ub > max_count_global:
+                max_count_global = ex_ub * ex_ub
+
+        # 결과 추출용 self 저장
+        self.person_prof_tasks = person_prof_tasks
+        self.excess_by_key = excess_by_key
+        self.threshold_by_key = threshold_by_key
+
+        # prof_term: 모든 (전공의,교수) 페어의 excess² 합 (정수)
+        if excess_sq_vars:
+            total_ub = sum(v.Proto().domain[-1] for v in excess_sq_vars) if False else max_count_global * len(excess_sq_vars)
+            prof_term_int = self.model.NewIntVar(0, max(1, total_ub), "prof_repeat_total")
+            self.model.Add(prof_term_int == sum(excess_sq_vars))
+        else:
+            prof_term_int = self.model.NewConstant(0)
+        self.prof_repeat_int_var = prof_term_int
+
+        # mode별 objective 분기
+        if self.prof_repeat_mode == 'find_lower_bound':
+            # Phase 1: prof_term을 lex 최우선으로 (가중치 10**10) — 진짜 도달 가능한 L 추출
+            # 다른 페널티는 그대로 두어 미배정/pair/이동 폭주 방지
+            PROF_LEX_WEIGHT = 10 ** 10
+            self.model.Minimize(prof_term_int * PROF_LEX_WEIGHT + unassigned_term + broken_term + shift_term + nonskip_panjung_term)
+        elif self.prof_repeat_mode == 'capped' and self.prof_repeat_cap is not None:
+            # Phase 2: prof_term ≤ cap hard 제약 + 기존 weighted objective
+            self.model.Add(prof_term_int <= int(self.prof_repeat_cap))
+            self.model.Minimize(unassigned_term + broken_term + shift_term + nonskip_panjung_term + prof_term_int * PROF_REPEAT_PENALTY)
+        else:
+            # 기본 'soft' (기존 호환): 가벼운 가중치로 단일 솔브
+            self.model.Minimize(unassigned_term + broken_term + shift_term + nonskip_panjung_term + prof_term_int * PROF_REPEAT_PENALTY)
+
+    def _rule_on(self, key):
+        """사용자가 UI에서 체크 해제하지 않은 룰인지 (해제했으면 False → 제약 안 검)"""
+        return key not in self.disabled_rules
 
     def build_model(self):
         """모든 제약 + 목적함수 추가"""
         self.build_variables()
+        # H1/H2(한 슬롯 1개·한 task 1명), H5(휴가/공휴일 차단)는 기본 전제 — 끌 수 없음
         self.add_h1_h2()
         self.add_h5_blocked()
-        self.add_h3_bogeonso()
-        self.add_h4_rad()
-        self.add_h8_r3_panjung()
-        self.add_h8b_r3_panjung_obs()
-        self.add_h8c_r3_panjung_pair()
-        self.add_h9_rookie_no_tx()
-        self.add_h10_r3_only()
-        self.add_h11_pairing()
-        self.add_h12_tx_90pct()
-        self.add_h13_pain_applicants()
-        self.add_h14_r1_tx_max_1()
-        self.add_h_tx_yejin_balance()  # 신규: 처치+예진 합 R2+R3 max-min ≤ 2
+        if self._rule_on("H3_bogeonso"):     self.add_h3_bogeonso()
+        if self._rule_on("H4_rad"):          self.add_h4_rad()
+        if self._rule_on("H8_r3_panjung"):   self.add_h8_r3_panjung()
+        if self._rule_on("H8b_r3_obs"):      self.add_h8b_r3_panjung_obs()
+        if self._rule_on("H8c_r3_pair"):     self.add_h8c_r3_panjung_pair()
+        if self._rule_on("H9_rookie_no_tx"): self.add_h9_rookie_no_tx()
+        if self._rule_on("H10_r3_only"):     self.add_h10_r3_only()
+        if self._rule_on("H11_pairing"):     self.add_h11_pairing()
+        if self._rule_on("H12_tx_90"):       self.add_h12_tx_90pct()
+        if self._rule_on("H13_pain"):        self.add_h13_pain_applicants()
+        if self._rule_on("H14_r1_tx1"):      self.add_h14_r1_tx_max_1()
+        if self._rule_on("H_tx_balance"):    self.add_h_tx_balance()        # 처치만, 연차 내 max-min ≤ 1
+        if self._rule_on("H_yejin_balance"): self.add_h_yejin_balance()     # 예진만, 연차 내 max-min ≤ 1
+        if self._rule_on("H_mkh_thu_r2"):    self.add_h_minkyeongha_geonjeung_thu_r2_only()
+        # 로딩은 항상 호출 — person_assigned 변수는 다른 룰/목적함수가 참조하므로,
+        # 끄기(H15/H16/H17)는 메서드 안에서 제약만 건너뛴다.
         self.add_h15_h16_h17_loading()
-        self.add_h18_weekly_panjung()
+        if self._rule_on("H18_panjung"):     self.add_h18_weekly_panjung()
         self.add_h19_r3_clinic_soft()
-        self.add_h21_year_panjung_diff()
-        self.add_h22_bogeonso_makeup()
+        if self._rule_on("H21_year_diff"):   self.add_h21_year_panjung_diff()
+        if self._rule_on("H22_bogeonso_mk"): self.add_h22_bogeonso_makeup()
+        self.add_manual_pins()   # 사용자 직접 지정은 항상 적용 (룰 체크박스와 무관)
         self.add_shift_allowance_limit()
         self.build_objective()
+
+    def _geonjeung_obs_to_judge(self):
+        """건증 묶음의 {판정참관 task_id: 짝 판정 task_id} 매핑.
+        미배정 결과를 '제외룰로 드롭된 참관'과 '진짜 미배정'으로 가르는 데 쓴다."""
+        groups = {}
+        for t in self.tasks:
+            pid = t['pair_id']
+            if pid:
+                groups.setdefault(pid, []).append(t['task_id'])
+        out = {}
+        for tids in groups.values():
+            names = [self.task_by_id[t]['task'] for t in tids]
+            if not any("건증" in n for n in names):
+                continue
+            j = next((t for t in tids
+                      if "판정" in self.task_by_id[t]['task']
+                      and "참관" not in self.task_by_id[t]['task']), None)
+            o = next((t for t in tids
+                      if "판정" in self.task_by_id[t]['task']
+                      and "참관" in self.task_by_id[t]['task']), None)
+            if j is not None and o is not None:
+                out[o] = j
+        return out
+
+    def _orphan_obs_tids(self):
+        """'이전 달에 생성된 참관' = 짝(차리/판정 등 비참관)이 이번 윈도우 밖이라
+        참관만 남은 task_id 집합. (pair 그룹에 참관만 있고 비참관 파트너가 없음)
+        ★ 판정참관(건증 판정참관) 계열만 대상. 외래참관·통증/비만클리닉 참관 orphan은
+          제외(= 기존처럼 강제 배정). 완화는 '이전 달에 생성된 판정참관'에만 적용해야 하며,
+          외래참관까지 드롭되면 안 됨.
+        이 참관들은 배정 강제(미배정 페널티)에서 제외 → 배정/드롭 자유, 드롭돼도 위반 아님."""
+        groups = {}
+        for t in self.tasks:
+            pid = t['pair_id']
+            if pid:
+                groups.setdefault(pid, []).append(t['task_id'])
+        orphan = set()
+        for tids in groups.values():
+            obs = [t for t in tids if "참관" in self.task_by_id[t]['task']]
+            nonobs = [t for t in tids if "참관" not in self.task_by_id[t]['task']]
+            if obs and not nonobs:
+                # 판정참관 계열만 완화 대상에 포함 (외래/클리닉 참관 orphan은 강제 배정 유지)
+                pj_obs = [t for t in obs
+                          if _is_panjung_obs_task(self.task_by_id[t]['task'])]
+                orphan.update(pj_obs)
+        return orphan
 
     def solve(self, time_limit_sec=60):
         solver = cp_model.CpSolver()
@@ -1338,6 +1772,10 @@ class CPSATScheduleSolver:
             'objective_value': solver.ObjectiveValue() if status in [cp_model.OPTIMAL, cp_model.FEASIBLE] else None,
             'assignments': {},
             'unassigned': [],
+            'skipped_panjung_obs': [],   # 제외룰로 의도적으로 드롭된 판정참관 (미배정과 구분)
+            'skipped_prev_month_obs': [],  # 이전 달에 생성된 참관(orphan) 중 배정 안 한 것 (미배정 아님)
+            # 장기휴가(가용 절반 이하)로 로딩 예외(0~9만 적용, H16/H17 제외)된 사람
+            'loading_exempt': sorted(getattr(self, 'loading_exempt', set())),
             'broken_pairs': [],
             'task_time_overrides': {},  # task_id → '오전' or '오후' (비고정 task 결과)
             'task_date_overrides': {},  # task_id → 새 date (date_alt로 이동된 경우)
@@ -1347,10 +1785,11 @@ class CPSATScheduleSolver:
         }
 
         if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+            _unassigned_raw = []
             for t in self.tasks:
                 tid = t['task_id']
                 if solver.Value(self.u[tid]) == 1:
-                    result['unassigned'].append(tid)
+                    _unassigned_raw.append(tid)
                     continue
                 for p in self.persons:
                     pname = p['name']
@@ -1366,9 +1805,48 @@ class CPSATScheduleSolver:
                         result['task_date_overrides'][tid] = t['date_alt']
                         result['shifted_tasks'].append(tid)
 
+            # 미배정 분류(우선순위):
+            #   1) 이전 달 참관(orphan) → skipped_prev_month_obs (배정 자유, 미배정 아님)
+            #   2) 제외룰로 '안 하기로 한' 판정참관 → skipped_panjung_obs
+            #   3) 그 외 → 진짜 미배정(unassigned)
+            obs_to_judge = self._geonjeung_obs_to_judge()
+            orphan_obs = getattr(self, '_orphan_obs', set())
+            for tid in _unassigned_raw:
+                if tid in orphan_obs:
+                    result['skipped_prev_month_obs'].append(tid)
+                    continue
+                jtid = obs_to_judge.get(tid)
+                if jtid is not None and result['assignments'].get(jtid) in self.skip_panjung_obs:
+                    result['skipped_panjung_obs'].append(tid)
+                else:
+                    result['unassigned'].append(tid)
+
             for pid, bp in self.broken_pair.items():
                 if solver.Value(bp) == 1:
                     result['broken_pairs'].append(pid)
+
+            # === S5 교수 중복 지수 breakdown (이차 정의 + 카테고리 + 가변 임계치) ===
+            # excess = max(0, count - thr) ; score = excess²
+            prof_repeat_pairs = []   # [{'person','prof','category','count','excess','score','threshold'}, ...]
+            prof_repeat_by_resident = {p['name']: 0 for p in self.persons}
+            total_score = 0
+            if hasattr(self, 'person_prof_tasks'):
+                for (pname, prof, cat), tids in self.person_prof_tasks.items():
+                    cnt = sum(solver.Value(self.x[(tid, pname)]) for tid in tids)
+                    thr = self.threshold_by_key.get((pname, prof, cat), 3)
+                    if cnt > thr:
+                        excess = cnt - thr
+                        score = excess * excess
+                        prof_repeat_pairs.append({
+                            'person': pname, 'prof': prof, 'category': cat,
+                            'count': cnt, 'excess': excess, 'score': score, 'threshold': thr,
+                        })
+                        prof_repeat_by_resident[pname] = prof_repeat_by_resident.get(pname, 0) + score
+                        total_score += score
+            result['prof_repeat_total'] = total_score                            # excess² 합 (objective 값)
+            result['prof_repeat_pair_count'] = len(prof_repeat_pairs)            # 임계치 초과 페어 개수
+            result['prof_repeat_pairs'] = prof_repeat_pairs
+            result['prof_repeat_by_resident'] = prof_repeat_by_resident
 
         return result
 
@@ -1447,6 +1925,50 @@ def _compute_auto_multiplier(df_all, residents, leaves, week_count, start_date, 
     return min(mult_x10, 1.5)
 
 
+def find_r3_only_shortage(df_all, residents, leaves, week_count, start_date, holidays,
+                          bogeonso_substitutes=None, rad_days=None, student_practices=None):
+    """R3만 받을 수 있는(H10) '자리·시간이 고정된' task가, 그 시간에 가능한 R3보다 많은 날을 찾는다.
+
+    차리/판정은 오전·오후를 솔버가 정하고 -1일 이동도 되므로 고정이 아니다 → 제외.
+    따라서 예진·조비룡/박민선 외래 '참관'만 센다.
+
+    반환: [{date, time, tasks[], available_r3[], shortage, candidates_r2[]}, ...]
+    """
+    pdata = build_problem_data(
+        df_all, residents, leaves, week_count, start_date, holidays,
+        bogeonso_substitutes=bogeonso_substitutes, rad_days=rad_days,
+        student_practices=student_practices
+    )
+    blocked = pdata['blocked']
+    forced = pdata.get('forced_assignments', {})
+    r3 = [p['name'] for p in pdata['persons'] if p['year'] == 'R3']
+    others = [p['name'] for p in pdata['persons'] if p['year'] != 'R3' and p['group'] != -1]
+
+    from collections import defaultdict
+    slots = defaultdict(list)
+    for t in pdata['tasks']:
+        # 고정 task만: 차리/판정은 시간·날짜가 유동이라 제외
+        if _is_r3_only_task(t['task']) and '차리' not in t['task'] and '판정' not in t['task']:
+            slots[(t['date'], t['time'])].append(t)
+
+    out = []
+    for (ds, tm), tl in sorted(slots.items()):
+        free_r3 = [n for n in r3
+                   if (n, ds, tm) not in blocked and (n, ds, tm) not in forced]
+        short = len(tl) - len(free_r3)
+        if short > 0:
+            out.append({
+                'date': ds, 'time': tm,
+                'tasks': [t['task'] for t in tl],
+                'task_ids': [t['task_id'] for t in tl],
+                'available_r3': free_r3,
+                'shortage': short,
+                'candidates_r2': [n for n in others
+                                  if (n, ds, tm) not in blocked and (n, ds, tm) not in forced],
+            })
+    return out
+
+
 def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, holidays,
                             bogeonso_substitutes=None, rad_days=None, student_practices=None,
                             pain_applicants=None, target_mult_multiplier=1.0,
@@ -1475,11 +1997,13 @@ def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, ho
         'H8c_r3_panjung_pair': 'H8c: R3의 판정과 판정참관은 반드시 같은 묶음 (단독 판정/참관 금지)',
         'H9_rookie_no_tx': 'H9: R0/의국처음 R1 = 처치 X',
         'H10_r3_only': 'H10: 조비룡/박민선 외래 차리/참관 + 예진 = R3만',
-        'H11_pairing': 'H11: 차리/판정 + 참관 묶음 = 같은 사람 (건증·박진호 묶음 절대 안 깸, 그 외 최대 5개 깨도 OK)',
+        'H11_pairing': 'H11: 차리/판정 + 참관 묶음 = 같은 사람 (건증·박진호·권혁태 묶음 절대 안 깸, 그 외 최대 5개 깨도 OK)',
         'H12_tx_90pct': 'H12: 처치(오전+오후) 90% 이상 R3+R2',
         'H13_pain_applicants': 'H13: 박진호 통증클리닉 사전 신청자 우선',
         'H14_r1_tx_max_1': 'H14: R1 처치 최대 1개',
-        'H_tx_yejin_balance': 'H_TX_YEJIN: 처치+예진 합 (R2+R3 풀) max-min ≤ 2',
+        'H_tx_balance': 'H_TX: 처치만 연차 내(R2/R3 각각) max-min ≤ 1',
+        'H_yejin_balance': 'H_YEJIN: 예진만 연차 내(R2/R3 각각) max-min ≤ 1',
+        'H_minkyeongha_geonjeung_thu_r2_only': 'H_MKH: 민경하 건증판정(목) → R2만',
         'H15_h16_h17_loading': 'H15-17: 그룹별 로딩 범위 + 내부 차이 ≤ 0.3 + strict 부등호 chain',
         'H18_weekly_panjung': 'H18: R2 최소 3개 / R1/R0 최대 (week+5) / max(R2) < min(R1/R0)',
         'H21_year_panjung_diff': 'H21: 같은 연차 내 판정 수 max-min ≤ 2',
@@ -1527,7 +2051,9 @@ def diagnose_infeasibility(df_all, residents, leaves, week_count, start_date, ho
         ('H12_tx_90pct', solver.add_h12_tx_90pct),
         ('H13_pain_applicants', solver.add_h13_pain_applicants),
         ('H14_r1_tx_max_1', solver.add_h14_r1_tx_max_1),
-        ('H_tx_yejin_balance', solver.add_h_tx_yejin_balance),
+        ('H_tx_balance', solver.add_h_tx_balance),
+        ('H_yejin_balance', solver.add_h_yejin_balance),
+        ('H_minkyeongha_geonjeung_thu_r2_only', solver.add_h_minkyeongha_geonjeung_thu_r2_only),
         ('H15_h16_h17_loading', solver.add_h15_h16_h17_loading),
         ('H18_weekly_panjung', solver.add_h18_weekly_panjung),
         ('H21_year_panjung_diff', solver.add_h21_year_panjung_diff),
@@ -1652,7 +2178,13 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
                                 pain_applicants=None, time_limit_sec=60,
                                 multipliers=None, manual_multiplier=None,
                                 loading_ranges=None, h17_ops=None,
-                                max_broken_pairs=5, extra_shift_allowance=0):
+                                max_broken_pairs=5, extra_shift_allowance=0,
+                                prof_repeat_mode='off', prof_repeat_multiplier=1.2,
+                                prof_repeat_slack=5,
+                                shift_forbid_date=None,
+                                skip_panjung_obs=None,
+                                assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None,
+                 longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
     """
     재설계:
       1) manual_multiplier가 주어지면 그 배율 사용. 아니면 사전 진단으로 자동 산출.
@@ -1678,7 +2210,8 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
     pdata_temp = build_problem_data(
         df_all, residents, leaves, week_count, start_date, holidays,
         bogeonso_substitutes=bogeonso_substitutes, rad_days=rad_days,
-        student_practices=student_practices, pain_applicants=pain_applicants
+        student_practices=student_practices, pain_applicants=pain_applicants,
+        shift_forbid_date=shift_forbid_date
     )
     # 날짜별 task 수
     tasks_per_date = {}
@@ -1736,15 +2269,121 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
         df_all, residents, leaves, week_count, start_date, holidays,
         bogeonso_substitutes=bogeonso_substitutes, rad_days=rad_days,
         student_practices=student_practices, pain_applicants=pain_applicants,
-        shift_allowed_tids=shift_allowed_tids
+        shift_allowed_tids=shift_allowed_tids,
+        shift_forbid_date=shift_forbid_date
     )
-    solver = CPSATScheduleSolver(pdata, target_mult_multiplier=auto_mult,
-                                 loading_ranges=loading_ranges, h17_ops=h17_ops,
-                                 max_broken_pairs=max_broken_pairs,
-                                 shortage_shift_tids=shortage_shift_tids,
-                                 extra_shift_limit=extra_shift_allowance)
-    solver.build_model()
-    result = solver.solve(time_limit_sec=time_limit_sec)
+    # === 솔브: prof_repeat_mode에 따라 단일 또는 2-phase ε-constraint ===
+    if prof_repeat_mode == 'eps_constraint':
+        import math as _math
+        # Phase 1: prof 최우선 lex로 진짜 도달 가능한 L 추출
+        p1_time = max(15, int(time_limit_sec * 0.4))
+        solver_p1 = CPSATScheduleSolver(
+            pdata, target_mult_multiplier=auto_mult,
+            loading_ranges=loading_ranges, h17_ops=h17_ops,
+            max_broken_pairs=max_broken_pairs,
+            shortage_shift_tids=shortage_shift_tids,
+            extra_shift_limit=extra_shift_allowance,
+            prof_repeat_mode='find_lower_bound',
+            residents=residents,
+            skip_panjung_obs=skip_panjung_obs,
+            assign_prev_month_obs=assign_prev_month_obs,
+        disabled_rules=disabled_rules,
+        manual_pins=manual_pins,
+        drop_prev_month_obs=drop_prev_month_obs,
+        panjung_ranges=panjung_ranges,
+        longleave_range=longleave_range,
+        weekly_extra_bogeonso=weekly_extra_bogeonso,
+        weekly_extra_rad=weekly_extra_rad,
+        )
+        solver_p1.build_model()
+        result_p1 = solver_p1.solve(time_limit_sec=p1_time)
+        L = result_p1.get('prof_repeat_total', None)
+
+        if result_p1['status'] in ['OPTIMAL', 'FEASIBLE'] and L is not None:
+            # cap = max(⌈배수 × L⌉, L + slack) — 작은 L 보호용 절대 여유
+            cap_mult = int(_math.ceil(prof_repeat_multiplier * L))
+            cap_slack = int(L) + int(prof_repeat_slack)
+            cap = max(cap_mult, cap_slack)
+            # Phase 2: cap 적용 후 기존 weighted objective로 본 솔브
+            p2_time = max(15, time_limit_sec - int(result_p1.get('wall_time_sec', 0)))
+            solver_p2 = CPSATScheduleSolver(
+                pdata, target_mult_multiplier=auto_mult,
+                loading_ranges=loading_ranges, h17_ops=h17_ops,
+                max_broken_pairs=max_broken_pairs,
+                shortage_shift_tids=shortage_shift_tids,
+                extra_shift_limit=extra_shift_allowance,
+                prof_repeat_mode='capped',
+                prof_repeat_cap=cap,
+                residents=residents,
+                skip_panjung_obs=skip_panjung_obs,
+                assign_prev_month_obs=assign_prev_month_obs,
+        disabled_rules=disabled_rules,
+        manual_pins=manual_pins,
+        drop_prev_month_obs=drop_prev_month_obs,
+        panjung_ranges=panjung_ranges,
+        longleave_range=longleave_range,
+        weekly_extra_bogeonso=weekly_extra_bogeonso,
+        weekly_extra_rad=weekly_extra_rad,
+            )
+            solver_p2.build_model()
+            result = solver_p2.solve(time_limit_sec=p2_time)
+            if result['status'] in ['OPTIMAL', 'FEASIBLE']:
+                result['prof_repeat_phase1_L'] = L
+                result['prof_repeat_cap_used'] = cap
+                result['prof_repeat_multiplier_used'] = prof_repeat_multiplier
+                result['prof_repeat_slack_used'] = prof_repeat_slack
+                result['prof_repeat_mode_used'] = 'eps_constraint'
+                result['wall_time_sec'] = result_p1.get('wall_time_sec', 0) + result.get('wall_time_sec', 0)
+            else:
+                # Phase 2 실패 → Phase 1 결과로 폴백 (이미 L 최소이고 다른 룰 다 만족)
+                result = result_p1
+                result['prof_repeat_phase1_L'] = L
+                result['prof_repeat_cap_used'] = cap
+                result['prof_repeat_multiplier_used'] = prof_repeat_multiplier
+                result['prof_repeat_slack_used'] = prof_repeat_slack
+                result['prof_repeat_mode_used'] = 'eps_constraint_phase1_only'
+        else:
+            # Phase 1 자체가 실패 → soft 모드로 폴백
+            solver = CPSATScheduleSolver(
+                pdata, target_mult_multiplier=auto_mult,
+                loading_ranges=loading_ranges, h17_ops=h17_ops,
+                max_broken_pairs=max_broken_pairs,
+                shortage_shift_tids=shortage_shift_tids,
+                extra_shift_limit=extra_shift_allowance,
+                residents=residents,
+                skip_panjung_obs=skip_panjung_obs,
+                assign_prev_month_obs=assign_prev_month_obs,
+        disabled_rules=disabled_rules,
+        manual_pins=manual_pins,
+        drop_prev_month_obs=drop_prev_month_obs,
+        panjung_ranges=panjung_ranges,
+        longleave_range=longleave_range,
+        weekly_extra_bogeonso=weekly_extra_bogeonso,
+        weekly_extra_rad=weekly_extra_rad,
+            )
+            solver.build_model()
+            result = solver.solve(time_limit_sec=time_limit_sec)
+            result['prof_repeat_mode_used'] = 'soft_fallback'
+    else:
+        # 기존 단일 솔브 (soft)
+        solver = CPSATScheduleSolver(pdata, target_mult_multiplier=auto_mult,
+                                     loading_ranges=loading_ranges, h17_ops=h17_ops,
+                                     max_broken_pairs=max_broken_pairs,
+                                     shortage_shift_tids=shortage_shift_tids,
+                                     extra_shift_limit=extra_shift_allowance,
+                                     residents=residents,
+                                     skip_panjung_obs=skip_panjung_obs,
+                                     assign_prev_month_obs=assign_prev_month_obs,
+                                     disabled_rules=disabled_rules,
+                                     manual_pins=manual_pins,
+                                     drop_prev_month_obs=drop_prev_month_obs,
+                                     panjung_ranges=panjung_ranges,
+                                     longleave_range=longleave_range,
+                                     weekly_extra_bogeonso=weekly_extra_bogeonso,
+                                     weekly_extra_rad=weekly_extra_rad)
+        solver.build_model()
+        result = solver.solve(time_limit_sec=time_limit_sec)
+        result['prof_repeat_mode_used'] = 'soft'
 
     # 메타데이터 추가
     result['multiplier_used'] = auto_mult
@@ -1776,7 +2415,13 @@ def solve_schedule(df_all, residents, leaves, week_count, start_date, holidays,
                    bogeonso_substitutes=None, rad_days=None, student_practices=None,
                    pain_applicants=None, time_limit_sec=60, manual_multiplier=None,
                    loading_ranges=None, h17_ops=None,
-                   max_broken_pairs=5, extra_shift_allowance=0):
+                   max_broken_pairs=5, extra_shift_allowance=0,
+                   prof_repeat_mode='off', prof_repeat_multiplier=1.2,
+                   prof_repeat_slack=5,
+                   shift_forbid_date=None,
+                   skip_panjung_obs=None,
+                   assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None,
+                 longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
     """
     app.py에서 호출하는 진입점.
 
@@ -1801,5 +2446,17 @@ def solve_schedule(df_all, residents, leaves, week_count, start_date, holidays,
         student_practices=student_practices, pain_applicants=pain_applicants,
         time_limit_sec=time_limit_sec, manual_multiplier=manual_multiplier,
         loading_ranges=loading_ranges, h17_ops=h17_ops,
-        max_broken_pairs=max_broken_pairs, extra_shift_allowance=extra_shift_allowance
+        max_broken_pairs=max_broken_pairs, extra_shift_allowance=extra_shift_allowance,
+        prof_repeat_mode=prof_repeat_mode, prof_repeat_multiplier=prof_repeat_multiplier,
+        prof_repeat_slack=prof_repeat_slack,
+        shift_forbid_date=shift_forbid_date,
+        skip_panjung_obs=skip_panjung_obs,
+        assign_prev_month_obs=assign_prev_month_obs,
+        disabled_rules=disabled_rules,
+        manual_pins=manual_pins,
+        drop_prev_month_obs=drop_prev_month_obs,
+        panjung_ranges=panjung_ranges,
+        longleave_range=longleave_range,
+        weekly_extra_bogeonso=weekly_extra_bogeonso,
+        weekly_extra_rad=weekly_extra_rad,
     )
