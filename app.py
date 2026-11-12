@@ -14,6 +14,9 @@ from cpsat_solver import DISABLEABLE_RULES  # 하드 룰 임시 해제 UI용 목
 
 st.set_page_config(page_title="의국 스케줄 마스터", layout="wide")
 
+from auth import require_password  # 접속 비밀번호 (같은 브라우저는 1년간 기억)
+require_password()
+
 # --- 초기 상태 설정 ---
 if 'base_date' not in st.session_state: st.session_state.base_date = datetime(2026, 6, 1).date()
 if 'week_count' not in st.session_state: st.session_state.week_count = 5
@@ -36,6 +39,8 @@ if 'relax_prev_month_obs' not in st.session_state: st.session_state.relax_prev_m
 if 'drop_prev_month_obs' not in st.session_state: st.session_state.drop_prev_month_obs = False  # 이전달 참관 아예 배정 안 함
 # 연차별 판정 개수 범위 {'R2':[lo,hi],'R1':[lo,hi],'R0':[lo,hi],'week_max':n}
 if 'panjung_ranges' not in st.session_state: st.session_state.panjung_ranges = {}
+# 연차별 처치 개수 범위 {'R3':[lo,hi],'R2':[lo,hi],'R1':[lo,hi]}
+if 'tx_ranges' not in st.session_state: st.session_state.tx_ranges = {}
 # 장기휴가자(가용 절반 이하) 로딩 범위
 if 'longleave_range' not in st.session_state: st.session_state.longleave_range = [0.0, 9.0]
 # 보건소/영상 주당 추가 배정
@@ -715,6 +720,7 @@ with st.sidebar:
         "relax_prev_month_obs": st.session_state.get("relax_prev_month_obs", False),
         "drop_prev_month_obs": st.session_state.get("drop_prev_month_obs", False),
         "panjung_ranges": st.session_state.get("panjung_ranges", {}),
+        "tx_ranges": st.session_state.get("tx_ranges", {}),
         "longleave_range": st.session_state.get("longleave_range", [0.0, 9.0]),
         "weekly_extra_bogeonso": st.session_state.get("weekly_extra_bogeonso", False),
         "weekly_extra_rad": st.session_state.get("weekly_extra_rad", False),
@@ -885,6 +891,12 @@ with st.sidebar:
             st.session_state.pop("ll_lo", None); st.session_state.pop("ll_hi", None)
         st.session_state.weekly_extra_bogeonso = bool(data.get("weekly_extra_bogeonso", False))
         st.session_state.weekly_extra_rad = bool(data.get("weekly_extra_rad", False))
+        _txr = data.get("tx_ranges")
+        if _txr:
+            st.session_state.tx_ranges = dict(_txr)
+            for _yr in ("R3", "R2", "R1"):
+                st.session_state.pop(f"tx_lo_{_yr}", None)
+                st.session_state.pop(f"tx_hi_{_yr}", None)
         _pjr = data.get("panjung_ranges")
         if _pjr:
             st.session_state.panjung_ranges = dict(_pjr)
@@ -1894,6 +1906,79 @@ with tabs[6]:
         except Exception:
             pass
 
+        # === 연차별 처치 개수 범위 ===
+        st.markdown("---")
+        st.markdown("##### 💉 연차별 처치 개수 범위")
+        st.caption(
+            "각 전공의가 한 달에 받을 **처치(오전/오후)** 개수의 하한~상한입니다. "
+            "기본값은 기존 룰과 동일(R1 최대 1개, R2·R3 제한 없음). "
+            "보건소·영상·의국처음·R0는 별도 룰이 있어 적용되지 않습니다. "
+            "⚠️ R1 상한을 올리거나 하한을 주려면 **H12(처치 90% = R2+R3)** 와 충돌할 수 있습니다 — "
+            "그때는 '하드 룰 임시 해제'에서 H12를 끄세요."
+        )
+        _tx_def = {'R3': [0, 30], 'R2': [0, 30], 'R1': [0, 1]}
+        for _k, _v in _tx_def.items():
+            if _k not in st.session_state.tx_ranges:
+                st.session_state.tx_ranges[_k] = list(_v)
+        with st.form("tx_cfg_form", border=False):
+            st.caption("⌨️ 값을 모두 고친 뒤 아래 **[💾 처치 범위 적용]** 을 눌러야 반영됩니다.")
+            _tx_form = {}
+            for _yr in ('R3', 'R2', 'R1'):
+                _cur = st.session_state.tx_ranges.get(_yr, _tx_def[_yr])
+                tc1, tc2, tc3 = st.columns([2, 1, 1])
+                tc1.markdown(f"**{_yr}**")
+                _lo = tc2.number_input("최소", min_value=0, max_value=50, value=int(_cur[0]),
+                                       step=1, key=f"tx_lo_{_yr}")
+                _hi = tc3.number_input("최대", min_value=0, max_value=50, value=int(_cur[1]),
+                                       step=1, key=f"tx_hi_{_yr}")
+                _tx_form[_yr] = [_lo, _hi]
+            _tx_submitted = st.form_submit_button("💾 처치 범위 적용", type="primary", use_container_width=True)
+        if _tx_submitted:
+            st.session_state.tx_ranges = _tx_form
+            st.toast("연차별 처치 개수 범위가 적용되었습니다.", icon="✅")
+            st.rerun()
+        _txc = st.session_state.tx_ranges
+        st.markdown(
+            f"**현재 적용 중:** R3 `{_txc['R3'][0]}~{_txc['R3'][1]}` · "
+            f"R2 `{_txc['R2'][0]}~{_txc['R2'][1]}` · "
+            f"R1 `{_txc['R1'][0]}~{_txc['R1'][1]}` (의국처음·R0 제외)"
+        )
+        for _yr in ('R3', 'R2', 'R1'):
+            if _txc[_yr][0] > _txc[_yr][1]:
+                st.warning(f"{_yr}: 최소({_txc[_yr][0]})가 최대({_txc[_yr][1]})보다 큽니다 — 해가 없습니다.")
+        # 공급/충돌 사전 검사
+        try:
+            _dfa2 = st.session_state.current_df_all
+            _tx_supply = 0
+            if _dfa2 is not None and not _dfa2.empty:
+                _tx_supply = int(_dfa2['task'].apply(lambda t: str(t).startswith('처치')).sum())
+            _rad_tx = {r['이름']: r.get('영상파견요일', []) for r in st.session_state.residents
+                       if "본원 영상" in r.get('역할', [])}
+            _cnt = {'R3': 0, 'R2': 0, 'R1': 0}
+            for _r in st.session_state.residents:
+                _ro = _r.get('역할', [])
+                if "연건 보건소" in _ro or ("본원 영상" in _ro and _rad_tx.get(_r['이름'])):
+                    continue
+                if _r['연차'] == 'R0' or (_r['연차'] == 'R1' and "의국 처음" in _ro):
+                    continue
+                if _r['연차'] in _cnt:
+                    _cnt[_r['연차']] += 1
+            _tx_need = sum(_txc[_yr][0] * _cnt[_yr] for _yr in ('R3', 'R2', 'R1'))
+            if _tx_supply:
+                if _tx_need > _tx_supply:
+                    st.error(f"❌ 최소 요구 {_tx_need}개 > 실제 처치 task {_tx_supply}개 — 해가 없습니다. 최소값을 낮추세요.")
+                else:
+                    st.caption(f"✅ 최소 요구 {_tx_need}개 / 실제 처치 task {_tx_supply}개 (인원: R3 {_cnt['R3']}·R2 {_cnt['R2']}·R1 {_cnt['R1']}명)")
+                _h12_cap = _tx_supply // 10
+                _r1_min_total = _txc['R1'][0] * _cnt['R1']
+                if _r1_min_total > _h12_cap and "H12_tx_90" not in (st.session_state.get('disabled_rules') or []):
+                    st.warning(
+                        f"⚠️ R1 최소 합({_r1_min_total}개)이 H12 허용치(전체의 10% = {_h12_cap}개)를 넘습니다 — "
+                        "이대로는 해가 없습니다. H12를 끄거나 R1 최소를 낮추세요."
+                    )
+        except Exception:
+            pass
+
         st.markdown("---")
         # 현재 적용 중인 값 + 유효성 경고 (폼 밖 — 적용된 값 기준)
         st.markdown("**현재 적용 중인 로딩 설정**")
@@ -1956,6 +2041,7 @@ with tabs[6]:
                         manual_pins=_pins_to_task_ids(df_gen, st.session_state.get('manual_pins')),
                         drop_prev_month_obs=bool(st.session_state.get('drop_prev_month_obs', False)),
                         panjung_ranges=st.session_state.get('panjung_ranges') or None,
+                        tx_ranges=st.session_state.get('tx_ranges') or None,
                         longleave_range=st.session_state.get('longleave_range') or None,
                         weekly_extra_bogeonso=bool(st.session_state.get('weekly_extra_bogeonso', False)),
                         weekly_extra_rad=bool(st.session_state.get('weekly_extra_rad', False)),

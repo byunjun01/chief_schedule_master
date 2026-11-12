@@ -184,7 +184,7 @@ DISABLEABLE_RULES = [
     ("H11_pairing",      "H11 · 차리/판정 + 참관 같은 사람", "건증·박진호·권혁태 묶음은 이 룰이 켜져 있으면 절대 안 깸"),
     ("H12_tx_90",        "H12 · 처치 90% 이상 R3+R2",       "처치(오전/오후)의 90% 이상을 R3·R2가 담당"),
     ("H13_pain",         "H13 · 통증클리닉 신청자 최소 1개", "신청한 전공의는 통증클리닉을 최소 1개 받음"),
-    ("H14_r1_tx1",       "H14 · R1 처치 최대 1개",          "R1은 처치를 1개까지만"),
+    ("H14_r1_tx1",       "H14 · 처치 개수 범위 (연차별)",     "기본: R1 최대 1개. 배정 탭 '연차별 처치 개수 범위'에서 조정 가능"),
     ("H_tx_balance",     "처치 균등 (연차 내 ±1)",           "R2/R3 각각 처치 수 max-min ≤ 1"),
     ("H_yejin_balance",  "예진 균등 (연차 내 ±1)",           "R2/R3 각각 예진 수 max-min ≤ 1"),
     ("H_mkh_thu_r2",     "민경하 건증판정(목) = R2만",       "민경하 목요일 건증 판정은 R2 전용"),
@@ -547,7 +547,7 @@ class CPSATScheduleSolver:
                  prof_repeat_mode='soft', prof_repeat_cap=None,
                  residents=None,
                  skip_panjung_obs=None,
-                 assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None,
+                 assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
                  longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
         self.data = problem_data
         self.target_mult_multiplier = target_mult_multiplier
@@ -576,6 +576,8 @@ class CPSATScheduleSolver:
         self.manual_pins = dict(manual_pins or {})
         # 연차별 판정 개수 범위 {'R2':[lo,hi], 'R1':[lo,hi], 'R0':[lo,hi], 'week_max':n}
         self.panjung_ranges = dict(panjung_ranges or {})
+        # 연차별 처치 개수 범위 {'R3':[lo,hi],'R2':[lo,hi],'R1':[lo,hi]} — 없으면 기본(R1 최대 1개)
+        self.tx_ranges = dict(tx_ranges or {})
         # 장기휴가자(가용 절반 이하) 로딩 범위 [lo, hi] — 기본 0.0~9.0
         _ll = longleave_range or (0.0, 9.0)
         self.longleave_range = (float(_ll[0]), float(_ll[1]))
@@ -1129,12 +1131,29 @@ class CPSATScheduleSolver:
 
     # ----- H14: R1 처치 최대 1개 -----
     def add_h14_r1_tx_max_1(self):
+        """연차별 처치 개수 범위 (사용자 설정 tx_ranges).
+        기본값(설정 없음): R1 최대 1개 (기존 H14 동작), R2/R3는 무제한.
+        보건소/영상(group -1)과 의국처음·R0(H9로 처치 금지)는 제외."""
         tx_task_ids = [t['task_id'] for t in self.tasks if _is_tx_task(t['task'])]
+        if not tx_task_ids:
+            return
+        _def = {'R1': (0, 1)}
         for p in self.persons:
-            if p['year'] != 'R1' or p['is_rookie']:
+            if p['group'] == -1 or p['is_rookie']:
+                continue
+            yr = p['year']
+            v = self.tx_ranges.get(yr)
+            if v and len(v) >= 2:
+                lo, hi = int(v[0]), int(v[1])
+            elif yr in _def:
+                lo, hi = _def[yr]
+            else:
                 continue
             pname = p['name']
-            self.model.Add(sum(self.x[(tid, pname)] for tid in tx_task_ids) <= 1)
+            expr = sum(self.x[(tid, pname)] for tid in tx_task_ids)
+            if lo > 0:
+                self.model.Add(expr >= lo)
+            self.model.Add(expr <= hi)
 
     # ----- H_TX_YEJIN: 처치+예진 합 R2+R3 풀에서 max-min ≤ 2 -----
     def _add_year_balance(self, task_ids, label, max_diff=1):
@@ -2183,7 +2202,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
                                 prof_repeat_slack=5,
                                 shift_forbid_date=None,
                                 skip_panjung_obs=None,
-                                assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None,
+                                assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
                  longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
     """
     재설계:
@@ -2291,6 +2310,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
         manual_pins=manual_pins,
         drop_prev_month_obs=drop_prev_month_obs,
         panjung_ranges=panjung_ranges,
+        tx_ranges=tx_ranges,
         longleave_range=longleave_range,
         weekly_extra_bogeonso=weekly_extra_bogeonso,
         weekly_extra_rad=weekly_extra_rad,
@@ -2321,6 +2341,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
         manual_pins=manual_pins,
         drop_prev_month_obs=drop_prev_month_obs,
         panjung_ranges=panjung_ranges,
+        tx_ranges=tx_ranges,
         longleave_range=longleave_range,
         weekly_extra_bogeonso=weekly_extra_bogeonso,
         weekly_extra_rad=weekly_extra_rad,
@@ -2357,6 +2378,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
         manual_pins=manual_pins,
         drop_prev_month_obs=drop_prev_month_obs,
         panjung_ranges=panjung_ranges,
+        tx_ranges=tx_ranges,
         longleave_range=longleave_range,
         weekly_extra_bogeonso=weekly_extra_bogeonso,
         weekly_extra_rad=weekly_extra_rad,
@@ -2378,6 +2400,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
                                      manual_pins=manual_pins,
                                      drop_prev_month_obs=drop_prev_month_obs,
                                      panjung_ranges=panjung_ranges,
+                                     tx_ranges=tx_ranges,
                                      longleave_range=longleave_range,
                                      weekly_extra_bogeonso=weekly_extra_bogeonso,
                                      weekly_extra_rad=weekly_extra_rad)
@@ -2420,7 +2443,7 @@ def solve_schedule(df_all, residents, leaves, week_count, start_date, holidays,
                    prof_repeat_slack=5,
                    shift_forbid_date=None,
                    skip_panjung_obs=None,
-                   assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None,
+                   assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
                  longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
     """
     app.py에서 호출하는 진입점.
@@ -2456,6 +2479,7 @@ def solve_schedule(df_all, residents, leaves, week_count, start_date, holidays,
         manual_pins=manual_pins,
         drop_prev_month_obs=drop_prev_month_obs,
         panjung_ranges=panjung_ranges,
+        tx_ranges=tx_ranges,
         longleave_range=longleave_range,
         weekly_extra_bogeonso=weekly_extra_bogeonso,
         weekly_extra_rad=weekly_extra_rad,
