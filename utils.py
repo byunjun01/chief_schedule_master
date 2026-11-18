@@ -387,10 +387,10 @@ def get_resident_target_mult(resident):
     """전공의의 기본 target_mult (사용자 의도 기준 로딩)"""
     year = resident['연차']
     roles = resident.get('역할', [])
-    if year == "R3":
+    if year in ("R3", "R2"):  # 수석(치프)은 R3·R2 모두 가능
         if "의국수석" in roles or "교육수석" in roles: return 5.5
-        elif "학생수석" in roles or "진료수석" in roles: return 6.5
-        else: return 7.0
+        if "학생수석" in roles or "진료수석" in roles: return 6.5
+    if year == "R3": return 7.0
     elif year == "R2": return 7.8
     elif year == "R1": return 8.5
     else: return 8.5  # R0
@@ -535,9 +535,10 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
         """0:의국/교육수석 1:학생/진료수석 2:일반R3 3:R2 4:R1/R0 (보건소/영상은 general_residents에서 이미 제외)"""
         roles = r.get('역할', [])
         yr = r['연차']
-        if yr == "R3":
+        if yr in ("R3", "R2"):  # 수석(치프)은 R3·R2 모두 가능
             if "의국수석" in roles or "교육수석" in roles: return 0
             if "학생수석" in roles or "진료수석" in roles: return 1
+        if yr == "R3":
             return 2
         if yr == "R2": return 3
         return 4  # R1/R0
@@ -976,11 +977,12 @@ def run_auto_assignment(df_all, residents, leaves, week_count, start_date, holid
         if d['is_bogeonso']: return -1
         if d['is_rad'] and rad_days.get(n): return -1
         yr = d['year']
-        if yr == "R3":
+        if yr in ("R3", "R2"):  # 수석(치프)은 R3·R2 모두 가능
             # roles 가져오기
             roles = next((r.get('역할', []) for r in residents if r['이름'] == n), [])
             if "의국수석" in roles or "교육수석" in roles: return 0
             if "학생수석" in roles or "진료수석" in roles: return 1
+        if yr == "R3":
             return 2
         if yr == "R2": return 3
         if yr in ["R1", "R0"]: return 4
@@ -1202,9 +1204,10 @@ def run_auto_assignment_multi(df_all, residents, leaves, week_count, start_date,
         if "연건 보건소" in roles: return -1
         if "본원 영상" in roles and rad_days and rad_days.get(r['이름']): return -1
         yr = r['연차']
-        if yr == "R3":
+        if yr in ("R3", "R2"):  # 수석(치프)은 R3·R2 모두 가능
             if "의국수석" in roles or "교육수석" in roles: return 0
             if "학생수석" in roles or "진료수석" in roles: return 1
+        if yr == "R3":
             return 2
         if yr == "R2": return 3
         if yr in ["R1", "R0"]:

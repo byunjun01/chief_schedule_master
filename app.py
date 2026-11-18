@@ -133,7 +133,13 @@ def get_sorted_residents(residents):
             elif "진료수석" in roles: rp = 30
             elif "본원 영상" in roles: rp = 10
             else: rp = 20
-        elif year == "R2": rp = 10 if "연건 보건소" in roles else 20
+        elif year == "R2":
+            if "의국수석" in roles: rp = 60
+            elif "교육수석" in roles: rp = 50
+            elif "학생수석" in roles: rp = 40
+            elif "진료수석" in roles: rp = 30
+            elif "연건 보건소" in roles: rp = 10
+            else: rp = 20
         return yp + rp
     return sorted(residents, key=rank_score, reverse=True)
 
@@ -1104,7 +1110,7 @@ with tabs[4]:
     # ── 인라인 편집 폼 (폼 안에서는 위젯 변경 시 rerun 없음, 적용 누르면 한 번에 commit) ─
     role_options_by_year = {
         "R3": ["본원 영상", "의국수석", "교육수석", "학생수석", "진료수석"],
-        "R2": ["연건 보건소"],
+        "R2": ["연건 보건소", "의국수석", "교육수석", "학생수석", "진료수석"],
         "R1": ["의국 처음"],
         "R0": ["의국 처음"],
     }
@@ -1749,8 +1755,8 @@ with tabs[6]:
                 st.session_state.pop(f"h17_op_{_g}", None)
             st.rerun()
         group_labels = {
-            0: "그룹0 · 의국/교육수석 (R3)",
-            1: "그룹1 · 학생/진료수석 (R3)",
+            0: "그룹0 · 의국/교육수석 (R3/R2)",
+            1: "그룹1 · 학생/진료수석 (R3/R2)",
             2: "그룹2 · 일반 R3",
             3: "그룹3 · R2",
             4: "그룹4 · 의국처음 (R1/R0 + 태그)",

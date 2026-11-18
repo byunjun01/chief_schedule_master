@@ -129,10 +129,10 @@ def get_resident_target_mult(resident):
     """전공의의 기본 target_mult (사용자 의도 기준 로딩)"""
     year = resident['연차']
     roles = resident.get('역할', [])
-    if year == "R3":
+    if year in ("R3", "R2"):  # 수석(치프)은 R3·R2 모두 가능
         if "의국수석" in roles or "교육수석" in roles: return 5.5
-        elif "학생수석" in roles or "진료수석" in roles: return 6.5
-        else: return 7.0
+        if "학생수석" in roles or "진료수석" in roles: return 6.5
+    if year == "R3": return 7.0
     elif year == "R2": return 7.8
     # R1/R0: '의국 처음' 태그 보유자는 중간 로딩(7.75), 그 외는 8.5
     if "의국 처음" in roles:
@@ -156,9 +156,10 @@ def get_loading_group(resident, rad_days_dict):
     if "연건 보건소" in roles: return -1
     if "본원 영상" in roles and rad_days_dict.get(name): return -1
     yr = resident['연차']
-    if yr == "R3":
+    if yr in ("R3", "R2"):  # 수석(치프)은 R3·R2 모두 가능
         if "의국수석" in roles or "교육수석" in roles: return 0
         if "학생수석" in roles or "진료수석" in roles: return 1
+    if yr == "R3":
         return 2
     if yr == "R2": return 3
     if yr in ["R1", "R0"]:
