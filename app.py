@@ -121,6 +121,9 @@ def get_date_options(base_date, week_count, extended=False):
             dates.append(f"{dt.strftime('%m-%d')} ({weekdays[d]}) [다음주]")
     return dates
 
+_CHIEF_ROLES = ("의국수석", "교육수석", "학생수석", "진료수석")
+
+
 def get_sorted_residents(residents):
     def rank_score(r):
         year, roles = r['연차'], r['역할']
@@ -1898,6 +1901,8 @@ with tabs[6]:
                 _ro = _r.get('역할', [])
                 if "연건 보건소" in _ro or ("본원 영상" in _ro and _rad_now.get(_r['이름'])):
                     continue                      # 로딩/판정 룰 제외 인원
+                if _r['연차'] == 'R2' and any(_c in _ro for _c in _CHIEF_ROLES):
+                    continue                      # R2 치프: R2 판정 최소값(H18) 미적용
                 if _r['연차'] == 'R3':
                     _need += 1                    # H8: 정확히 1개
                 elif _r['연차'] in ('R2', 'R1', 'R0'):
@@ -1967,6 +1972,8 @@ with tabs[6]:
                     continue
                 if _r['연차'] == 'R0' or (_r['연차'] == 'R1' and "의국 처음" in _ro):
                     continue
+                if _r['연차'] == 'R2' and any(_c in _ro for _c in _CHIEF_ROLES):
+                    continue                      # R2 치프: R2 처치 하한 미적용
                 if _r['연차'] in _cnt:
                     _cnt[_r['연차']] += 1
             _tx_need = sum(_txc[_yr][0] * _cnt[_yr] for _yr in ('R3', 'R2', 'R1'))

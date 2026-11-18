@@ -303,6 +303,8 @@ def build_problem_data(df_all, residents, leaves, week_count, start_date, holida
             'is_rad': "본원 영상" in roles and bool(rad_days.get(r['이름'])),
             'is_rookie': "의국 처음" in roles or r['연차'] == "R0",
             'group': get_loading_group(r, rad_days),
+            # R2 수석(치프): 로딩 그룹 0/1로 분류되며, R2 연차 기준 룰(균등·판정 차이·처치 하한)보다 치프 기준을 우선
+            'is_r2_chief': r['연차'] == "R2" and get_loading_group(r, rad_days) in (0, 1),
         })
 
     # blocked: 본인이 그 슬롯에 task 받을 수 없는 (person, date, time) 집합
@@ -1150,6 +1152,8 @@ class CPSATScheduleSolver:
                 lo, hi = _def[yr]
             else:
                 continue
+            if p.get('is_r2_chief'):
+                lo = 0  # R2 치프는 R2 처치 하한 미적용 (치프 로딩 우선), 상한만 유지
             pname = p['name']
             expr = sum(self.x[(tid, pname)] for tid in tx_task_ids)
             if lo > 0:
@@ -1166,7 +1170,8 @@ class CPSATScheduleSolver:
             pool = [p for p in self.persons
                     if p['year'] == year
                     and not p['is_bogeonso']
-                    and not p['is_rad']]
+                    and not p['is_rad']
+                    and not p.get('is_r2_chief')]  # R2 치프는 R2 균등 풀에서 제외 (치프 로딩 우선)
             if len(pool) < 2:
                 continue
             person_cnt = {}
@@ -1488,8 +1493,8 @@ class CPSATScheduleSolver:
         # 연차별 사람 그룹 (group -1 = 영상/보건소 제외)
         year_groups = {}
         for p in self.persons:
-            if p['group'] == -1:
-                continue
+            if p['group'] == -1 or p.get('is_r2_chief'):
+                continue  # R2 치프는 R2 판정 수 차이 비교에서 제외 (치프 로딩 우선)
             year_groups.setdefault(p['year'], []).append(p['name'])
         # 사람별 판정 수 변수
         pj_count = {}
