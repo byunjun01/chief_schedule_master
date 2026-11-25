@@ -8,6 +8,7 @@ import math
 import traceback
 from datetime import datetime, timedelta
 from utils import PROF_ORDER, RAW_SCHEDULES_INITIAL, get_task_style, get_prof_raw_style, generate_schedule, run_auto_assignment, biweekly_week_active, is_prof_off
+from utils import ADJUST_STAGE1_ROW, ADJUST_STAGE_ROWS, ADJUST_STAGE3_YEARS, apply_adjust_stage, adjust_stage_skip_names, detect_adjust_stage
 from manual import show_manual # [추가] 사용법 모듈 불러오기
 from verification import verify_schedule  # [추가] 스케줄 검증 모듈
 from cpsat_solver import DISABLEABLE_RULES  # 하드 룰 임시 해제 UI용 목록
@@ -733,6 +734,7 @@ with st.sidebar:
         "longleave_range": st.session_state.get("longleave_range", [0.0, 9.0]),
         "weekly_extra_bogeonso": st.session_state.get("weekly_extra_bogeonso", False),
         "weekly_extra_rad": st.session_state.get("weekly_extra_rad", False),
+        "adjust_stage3_years": st.session_state.get("adjust_stage3_years"),
         "biweekly_choice": st.session_state.get("biweekly_choice", {}),
         "disabled_rules": st.session_state.get("disabled_rules", []),
         "manual_pins": st.session_state.get("manual_pins", []),
@@ -900,6 +902,8 @@ with st.sidebar:
             st.session_state.pop("ll_lo", None); st.session_state.pop("ll_hi", None)
         st.session_state.weekly_extra_bogeonso = bool(data.get("weekly_extra_bogeonso", False))
         st.session_state.weekly_extra_rad = bool(data.get("weekly_extra_rad", False))
+        if data.get("adjust_stage3_years") in ADJUST_STAGE3_YEARS:
+            st.session_state.adjust_stage3_years = data["adjust_stage3_years"]
         _txr = data.get("tx_ranges")
         if _txr:
             st.session_state.tx_ranges = dict(_txr)
@@ -1446,6 +1450,8 @@ with tabs[6]:
                 loading_ranges=st.session_state.loading_ranges,
                 skip_panjung_obs=st.session_state.get('skip_panjung_obs') or None,
                 biweekly_choice=st.session_state.get('biweekly_choice'),
+                weekly_extra_bogeonso=bool(st.session_state.get('weekly_extra_bogeonso', False)),
+                weekly_extra_rad=bool(st.session_state.get('weekly_extra_rad', False)),
             )
             if diagnosis_result['status'] == "적합":
                 st.markdown(f"<div style='padding:10px; background:#E8F8F5; border-left:4px solid #1abc9c; border-radius:3px;'>{diagnosis_result['message']}</div>", unsafe_allow_html=True)
@@ -1455,6 +1461,51 @@ with tabs[6]:
         except Exception as e:
             st.error(f"진단 중 오류: {e}")
             diagnosis_result = None
+
+        # === 조정 단계별 로딩 미리보기 (1~4단계 × 보건소·영상 추가 업무 끔/켬 = 8가지) ===
+        with st.expander("🪜 조정 단계별 로딩 미리보기 (1~4단계 × 추가 업무 끔/켬 = 8가지)", expanded=False):
+            try:
+                _stage_years = st.session_state.get('adjust_stage3_years') or list(ADJUST_STAGE3_YEARS.keys())[0]
+                _cur_st = detect_adjust_stage(st.session_state.master_schedules,
+                                              st.session_state.get('skip_panjung_obs', []))
+                st.caption(
+                    "현재 일정표를 기준으로 각 단계를 적용했다고 가정해 계산한 값입니다 (실제 설정은 바뀌지 않음). "
+                    f"3·4단계 판정참관 제외 연차: **{_stage_years}** (규칙 설정 탭에서 변경).  \n"
+                    "'추가 업무 켬' = 보건소 처치(오후) 주당 1개 + 영상 예진 주당 1개를 그 인원이 가져가 일반 풀 task가 줄어든 경우."
+                )
+                _rows = []
+                for _st in (1, 2, 3, 4):
+                    _ms_st, _ = apply_adjust_stage(st.session_state.master_schedules, _st)
+                    _skip_st = adjust_stage_skip_names(st.session_state.residents, _st, _stage_years)
+                    for _ex in (False, True):
+                        _r = pre_assignment_diagnosis(
+                            st.session_state.residents, st.session_state.resident_leaves,
+                            st.session_state.week_count, st.session_state.base_date,
+                            u_holidays_for_diag, st.session_state.off_slots, _ms_st,
+                            supplementary_schedules=st.session_state.supplementary_schedules,
+                            rad_days=rad_days_for_diag,
+                            student_practices=st.session_state.student_practices,
+                            bogeonso_substitutes=st.session_state.bogeonso_substitutes,
+                            loading_ranges=st.session_state.loading_ranges,
+                            skip_panjung_obs=_skip_st or None,
+                            biweekly_choice=st.session_state.get('biweekly_choice'),
+                            weekly_extra_bogeonso=_ex, weekly_extra_rad=_ex,
+                        )
+                        _rows.append({
+                            "단계": f"{_st}단계" + (" (현재)" if _cur_st == _st else ""),
+                            "연보·영상 추가 업무": "켬" if _ex else "끔",
+                            "생성 task": _r['total_general_df_tasks'],
+                            "일반 풀 task": _r['general_tasks'],
+                            "필요 평균 로딩": round(_r['required_avg_loading'], 2),
+                            "지정 평균 로딩": round(_r['ideal_avg_target_mult'], 2),
+                            "판정": ("✅ 적합" if _r['status'] == "적합"
+                                     else f"🔴 부족 (×{_r['multiplier']:.2f})"),
+                        })
+                st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+                st.caption("필요 평균 로딩 = 일반 풀 task × 10 ÷ 일반 전공의 가용 세션. "
+                           "지정 평균 로딩보다 크면 '부족'이고, 괄호 안은 자동 상향 배율입니다.")
+            except Exception as e:
+                st.error(f"단계별 미리보기 계산 중 오류: {e}")
 
     st.markdown("---")
     # === CP-SAT 솔버 설정 (CP-SAT 모드 상시 사용) ===
@@ -2821,6 +2872,50 @@ with tabs[2]:
 
 # 탭 인덱스 3 (기존 2): 규칙 설정 (수정된 st.form 적용 완료)
 with tabs[3]:
+    # === 스케줄 조정 단계 (1~4단계 버튼 — 누르면 바로 적용) ===
+    st.markdown("#### 🪜 스케줄 조정 단계")
+    if st.session_state.get('_adjust_stage_msg'):
+        st.toast(st.session_state.pop('_adjust_stage_msg'), icon="✅")
+    _cur_stage = detect_adjust_stage(st.session_state.master_schedules,
+                                     st.session_state.get('skip_panjung_obs', []))
+    st.caption(
+        "단계는 **누적**입니다 (예: 3단계 = 1·2·3단계 조정 모두 적용). 버튼을 누르면 아래 외래 일정표와 "
+        "'판정참관 배정 제외 대상'(전공의 명단 탭)이 바로 바뀝니다.  \n"
+        f"**1단계**: {' '.join(ADJUST_STAGE1_ROW)} 판정참관 생성 안 함 (기본)  \n"
+        f"**2단계**: + {', '.join(' '.join(k) for k in ADJUST_STAGE_ROWS[2])} 차리·참관 생성 안 함  \n"
+        "**3단계**: + 선택한 연차 판정참관 제외  \n"
+        f"**4단계**: + {', '.join(' '.join(k) for k in ADJUST_STAGE_ROWS[4])} 차리·참관 생성 안 함"
+    )
+    if _cur_stage:
+        st.success(f"현재 적용 중: **{_cur_stage}단계**")
+    else:
+        st.info("현재 설정은 1~4단계 어느 것과도 정확히 일치하지 않습니다 (직접 수정한 상태).")
+    _yr_opts = list(ADJUST_STAGE3_YEARS.keys())
+    if st.session_state.get('adjust_stage3_years') not in _yr_opts:
+        st.session_state.adjust_stage3_years = _yr_opts[0]
+    st.radio("3단계 판정참관 제외 연차", _yr_opts, key="adjust_stage3_years", horizontal=True,
+             help="6월부터는 2·3년차, 1·2월에는 1년차까지 제외를 고려합니다. 3·4단계에 적용됩니다.")
+    _sbtn = st.columns(4)
+    for _i, _col in enumerate(_sbtn, start=1):
+        if _col.button(f"{_i}단계", key=f"adjust_stage_btn_{_i}", use_container_width=True,
+                       type="primary" if _cur_stage == _i else "secondary"):
+            _new_ms, _missing = apply_adjust_stage(st.session_state.master_schedules, _i)
+            st.session_state.master_schedules = _new_ms
+            st.session_state.skip_panjung_obs = adjust_stage_skip_names(
+                st.session_state.residents, _i, st.session_state.adjust_stage3_years)
+            st.session_state.pop('skip_panjung_obs_multiselect', None)  # 명단 탭 위젯 재초기화
+            _uh = [h.strip() for h in st.session_state.user_holidays_str.split(',') if h.strip()]
+            st.session_state.current_df_all = generate_schedule(
+                st.session_state.base_date, st.session_state.week_count, _uh,
+                st.session_state.master_schedules, st.session_state.off_slots,
+                supplementary_schedules=st.session_state.supplementary_schedules,
+                biweekly_choice=st.session_state.get('biweekly_choice'))
+            _msg = f"{_i}단계 적용됨"
+            if _missing:
+                _msg += f" (일정표에 없어 건너뜀: {', '.join(_missing)})"
+            st.session_state['_adjust_stage_msg'] = _msg
+            st.rerun()
+    st.markdown("---")
     with st.form("master_schedule_form"):
         edited_df = st.data_editor(
             st.session_state.master_schedules,

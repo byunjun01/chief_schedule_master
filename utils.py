@@ -79,6 +79,88 @@ RAW_SCHEDULES_INITIAL = [
     ("전혜령", "목", "오후", "건증", "홀수주", True, True, None), ("전혜령", "금", "오후", "재택외래", "매주", False, False, None)
 ]
 
+# ============================================================
+# 스케줄 조정 단계 (규칙 설정 탭의 1~4단계 버튼)
+#   단계는 누적: N단계 = 1~N단계 조정을 모두 적용
+#   1단계: 민경하 목 건증 판정참관 생성 안 함 (기본 세팅)
+#   2단계: + 아래 암외래 4개 차리·참관 생성 안 함
+#   3단계: + 선택 연차(2·3년차 또는 1·2·3년차) 판정참관 제외 (skip_panjung_obs)
+#   4단계: + 아래 외래 4개 차리·참관 생성 안 함
+# ============================================================
+ADJUST_STAGE1_ROW = ("민경하", "목", "오전", "건증")   # 차리 O / 참관 X
+ADJUST_STAGE_ROWS = {
+    2: [("김지영", "수", "오전", "암외래"), ("민경하", "화", "오후", "암외래"),
+        ("조수환", "목", "오전", "암외래"), ("황서은", "목", "오전", "암외래")],
+    4: [("김하진", "월", "오후", "외래"), ("김지영", "목", "오후", "외래"),
+        ("조수환", "목", "오후", "암외래"), ("황서은", "수", "오후", "암외래")],
+}
+# 3단계 판정참관 제외 연차 선택지
+ADJUST_STAGE3_YEARS = {
+    "2·3년차 (R2·R3)": ("R2", "R3"),
+    "1·2·3년차 (R1·R2·R3)": ("R1", "R2", "R3"),
+}
+
+
+def _stage_row_mask(df, key):
+    p, d, t, c = key
+    return ((df["교수명"] == p) & (df["요일"] == d) & (df["시간"] == t) & (df["진료명"] == c))
+
+
+def apply_adjust_stage(master_df, stage):
+    """master_df 사본에 조정 단계(1~4)를 적용해 반환. (new_df, 일정표에 없는 항목 리스트)
+    단계 대상 외래는 '켜짐(차리·참관 생성)'으로 되돌린 뒤, stage 이하 단계의 항목만 끈다."""
+    df = master_df.copy()
+    missing = []
+    # 1단계 항목: 항상 차리 O / 참관 X (1단계가 최소 단계)
+    m = _stage_row_mask(df, ADJUST_STAGE1_ROW)
+    if m.any():
+        df.loc[m, "차리생성"] = True
+        df.loc[m, "참관생성"] = False
+    else:
+        missing.append(" ".join(ADJUST_STAGE1_ROW))
+    for st_no, rows in ADJUST_STAGE_ROWS.items():
+        off = stage >= st_no
+        for key in rows:
+            m = _stage_row_mask(df, key)
+            if not m.any():
+                missing.append(" ".join(key))
+                continue
+            df.loc[m, "차리생성"] = not off
+            df.loc[m, "참관생성"] = not off
+    return df, missing
+
+
+def adjust_stage_skip_names(residents, stage, years_label):
+    """3단계 이상이면 선택 연차 전공의 이름 리스트(판정참관 제외 대상), 아니면 []"""
+    if stage < 3:
+        return []
+    years = ADJUST_STAGE3_YEARS.get(years_label, ("R2", "R3"))
+    return [r["이름"] for r in residents if r.get("연차") in years]
+
+
+def detect_adjust_stage(master_df, skip_names):
+    """현재 일정표/판정참관 제외 설정이 몇 단계와 일치하는지 반환. 어느 단계와도 안 맞으면 None."""
+    def _state(key):
+        m = _stage_row_mask(master_df, key)
+        if not m.any():
+            return None
+        row = master_df[m].iloc[0]
+        return (bool(row["차리생성"]), bool(row["참관생성"]))
+    if _state(ADJUST_STAGE1_ROW) not in ((True, False), None):
+        return None
+    def _all(st_no, val):
+        return all(_state(k) in (val, None) for k in ADJUST_STAGE_ROWS[st_no])
+    on, off = (True, True), (False, False)
+    has_skip = bool(skip_names)
+    if _all(2, on) and _all(4, on) and not has_skip:
+        return 1
+    if _all(2, off) and _all(4, on):
+        return 3 if has_skip else 2
+    if _all(2, off) and _all(4, off) and has_skip:
+        return 4
+    return None
+
+
 def find_nearest_working_day(dt, holidays):
     curr = dt
     while curr.weekday() >= 5 or curr.strftime("%m-%d") in holidays:
@@ -396,8 +478,10 @@ def get_resident_target_mult(resident):
     else: return 8.5  # R0
 
 
-def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays, off_slots, master_schedules_df, supplementary_schedules=None, rad_days=None, student_practices=None, bogeonso_substitutes=None, loading_ranges=None, skip_panjung_obs=None, biweekly_choice=None):
+def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays, off_slots, master_schedules_df, supplementary_schedules=None, rad_days=None, student_practices=None, bogeonso_substitutes=None, loading_ranges=None, skip_panjung_obs=None, biweekly_choice=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
     """
+    weekly_extra_bogeonso / weekly_extra_rad: 보건소(처치 오후)·영상(예진) 주당 1개 추가 옵션.
+        켜면 그만큼의 task를 보건소/영상 인원이 가져가므로 일반 풀 task에서 차감한다.
     사전 진단: 일반 배정 가능한 슬롯 수 vs 배정해야 할 task 수를 비교하여
     사용자 지정 target_mult로 배정 가능한지 판단하고, 필요한 경우 자동 상향 배수를 계산.
 
@@ -505,6 +589,23 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
 
     # 전체 task 수에서 영상 파견자가 가져갈 task 수 + 드롭 예상 판정참관을 제외 (일반 풀 로딩 비율 계산용)
     general_tasks = len(df_all) - estimated_rad_clinic_tasks - estimated_skipped_obs
+
+    # === 2-c) 보건소/영상 주당 추가 업무: 그 인원이 가져가는 task만큼 일반 풀에서 차감 ===
+    #   보건소: 주당 처치(오후) 1개 (처치(오후)가 있는 주만) / 영상: 주당 예진 1개 (예진이 있는 주만)
+    extra_offload = 0
+    if weekly_extra_bogeonso or weekly_extra_rad:
+        def _weeks_with(pred):
+            ws = set()
+            for _, row in df_all.iterrows():
+                if pred(str(row['task'])):
+                    ws.add(row.get('week'))
+            return len(ws)
+        if weekly_extra_bogeonso:
+            n_bg = sum(1 for r in residents if "연건 보건소" in r.get('역할', []))
+            extra_offload += n_bg * _weeks_with(lambda t: t == '처치 (오후)')
+        if weekly_extra_rad:
+            extra_offload += rad_resident_count * _weeks_with(lambda t: "예진" in t)
+    general_tasks -= extra_offload
     # 추가로 일반 task는 모두 일반 전공의 풀에서 처리하므로 그대로 사용
     # (보건소 task는 daily_slots에 직접 들어가는 거라 df_all에 없음)
 
@@ -572,6 +673,8 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
         status = "부족"
 
     _skip_note = f" | 판정참관 제외 추정 −{estimated_skipped_obs}개 반영" if estimated_skipped_obs else ""
+    if extra_offload:
+        _skip_note += f" | 보건소·영상 추가 업무 −{extra_offload}개 반영"
     if status == "적합":
         message = f"✅ 적합 — 배정 필요 task 총 {total_tasks_needed}개 (일반 {total_general_df_tasks} + 연보/메인/학생/영상 {forced_total}){_skip_note} | 일반 풀 필요 로딩 {required_avg:.2f} ≤ 지정 {ideal_avg:.2f}"
     else:
@@ -585,6 +688,7 @@ def pre_assignment_diagnosis(residents, leaves, week_count, start_date, holidays
         "total_general_df_tasks": total_general_df_tasks,
         "forced_total": forced_total,
         "estimated_skipped_obs": estimated_skipped_obs,  # 판정참관 제외로 빠질 것으로 추정한 참관 수
+        "extra_offload": extra_offload,                  # 보건소/영상 추가 업무로 일반 풀에서 빠진 task 수
 
         "ideal_avg_target_mult": ideal_avg,
         "required_avg_loading": required_avg,
