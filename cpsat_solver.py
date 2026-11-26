@@ -79,6 +79,15 @@ def _is_r3_only_task(task_name):
     return False
 
 
+def _r3_only_category(task_name):
+    """H10 R3 전용 task의 종류: 'yejin'(예진) / 'jbr_pms'(조비룡·박민선 외래) / None"""
+    if "예진" in task_name:
+        return 'yejin'
+    if _is_r3_only_task(task_name):
+        return 'jbr_pms'
+    return None
+
+
 def _is_tx_task(task_name):
     """처치 task"""
     return "처치" in task_name
@@ -550,7 +559,7 @@ class CPSATScheduleSolver:
                  prof_repeat_mode='soft', prof_repeat_cap=None,
                  residents=None,
                  skip_panjung_obs=None,
-                 assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
+                 assign_prev_month_obs=True, disabled_rules=None, h10_r2_allow=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
                  longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
         self.data = problem_data
         self.target_mult_multiplier = target_mult_multiplier
@@ -574,6 +583,8 @@ class CPSATScheduleSolver:
         self.assign_prev_month_obs = bool(assign_prev_month_obs)
         # 사용자가 UI에서 체크 해제한 하드 룰 key 집합 (DISABLEABLE_RULES 참고)
         self.disabled_rules = set(disabled_rules or ())
+        # H10 R2 허용 항목: {'yejin'(예진), 'jbr_pms'(조비룡·박민선 외래 차리/참관)} — R1/R0는 계속 차단
+        self.h10_r2_allow = set(h10_r2_allow or ())
         # 사용자가 직접 못박은 배정 {task_id: 전공의 이름}
         # 지정된 task는 그 사람에게 강제 배정되고, H10(R3 전용) 같은 자격 제한은 우회한다.
         self.manual_pins = dict(manual_pins or {})
@@ -984,14 +995,17 @@ class CPSATScheduleSolver:
     def add_h10_r3_only(self):
         """조비룡/박민선 외래 차리/참관, 예진 = R3만
         단, 사용자가 직접 지정(핀)한 task는 예외 — 그 칸은 지정한 사람(R2 등)이 받는다."""
-        r3_only_task_ids = [t['task_id'] for t in self.tasks
-                            if _is_r3_only_task(t['task']) and t['task_id'] not in self.manual_pins]
+        r3_only_tasks = [t for t in self.tasks
+                         if _is_r3_only_task(t['task']) and t['task_id'] not in self.manual_pins]
         for p in self.persons:
             if p['year'] == 'R3':
                 continue
             pname = p['name']
-            for tid in r3_only_task_ids:
-                self.model.Add(self.x[(tid, pname)] == 0)
+            for t in r3_only_tasks:
+                # 설정에서 R2에게 연 항목은 R2 차단 안 함 (R1/R0는 그대로 차단)
+                if p['year'] == 'R2' and _r3_only_category(t['task']) in self.h10_r2_allow:
+                    continue
+                self.model.Add(self.x[(t['task_id'], pname)] == 0)
 
     # ----- 사용자 직접 지정(핀) -----
     def add_manual_pins(self):
@@ -1951,8 +1965,10 @@ def _compute_auto_multiplier(df_all, residents, leaves, week_count, start_date, 
 
 
 def find_r3_only_shortage(df_all, residents, leaves, week_count, start_date, holidays,
-                          bogeonso_substitutes=None, rad_days=None, student_practices=None):
+                          bogeonso_substitutes=None, rad_days=None, student_practices=None,
+                          h10_r2_allow=None):
     """R3만 받을 수 있는(H10) '자리·시간이 고정된' task가, 그 시간에 가능한 R3보다 많은 날을 찾는다.
+    h10_r2_allow에 들어 있는 항목(R2에게 연 task)은 R3 전용이 아니므로 세지 않는다.
 
     차리/판정은 오전·오후를 솔버가 정하고 -1일 이동도 되므로 고정이 아니다 → 제외.
     따라서 예진·조비룡/박민선 외래 '참관'만 센다.
@@ -1973,7 +1989,8 @@ def find_r3_only_shortage(df_all, residents, leaves, week_count, start_date, hol
     slots = defaultdict(list)
     for t in pdata['tasks']:
         # 고정 task만: 차리/판정은 시간·날짜가 유동이라 제외
-        if _is_r3_only_task(t['task']) and '차리' not in t['task'] and '판정' not in t['task']:
+        if (_is_r3_only_task(t['task']) and '차리' not in t['task'] and '판정' not in t['task']
+                and _r3_only_category(t['task']) not in set(h10_r2_allow or ())):
             slots[(t['date'], t['time'])].append(t)
 
     out = []
@@ -2208,7 +2225,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
                                 prof_repeat_slack=5,
                                 shift_forbid_date=None,
                                 skip_panjung_obs=None,
-                                assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
+                                assign_prev_month_obs=True, disabled_rules=None, h10_r2_allow=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
                  longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
     """
     재설계:
@@ -2313,6 +2330,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
             skip_panjung_obs=skip_panjung_obs,
             assign_prev_month_obs=assign_prev_month_obs,
         disabled_rules=disabled_rules,
+        h10_r2_allow=h10_r2_allow,
         manual_pins=manual_pins,
         drop_prev_month_obs=drop_prev_month_obs,
         panjung_ranges=panjung_ranges,
@@ -2344,6 +2362,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
                 skip_panjung_obs=skip_panjung_obs,
                 assign_prev_month_obs=assign_prev_month_obs,
         disabled_rules=disabled_rules,
+        h10_r2_allow=h10_r2_allow,
         manual_pins=manual_pins,
         drop_prev_month_obs=drop_prev_month_obs,
         panjung_ranges=panjung_ranges,
@@ -2381,6 +2400,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
                 skip_panjung_obs=skip_panjung_obs,
                 assign_prev_month_obs=assign_prev_month_obs,
         disabled_rules=disabled_rules,
+        h10_r2_allow=h10_r2_allow,
         manual_pins=manual_pins,
         drop_prev_month_obs=drop_prev_month_obs,
         panjung_ranges=panjung_ranges,
@@ -2403,6 +2423,7 @@ def solve_with_auto_multiplier(df_all, residents, leaves, week_count, start_date
                                      skip_panjung_obs=skip_panjung_obs,
                                      assign_prev_month_obs=assign_prev_month_obs,
                                      disabled_rules=disabled_rules,
+                                     h10_r2_allow=h10_r2_allow,
                                      manual_pins=manual_pins,
                                      drop_prev_month_obs=drop_prev_month_obs,
                                      panjung_ranges=panjung_ranges,
@@ -2449,7 +2470,7 @@ def solve_schedule(df_all, residents, leaves, week_count, start_date, holidays,
                    prof_repeat_slack=5,
                    shift_forbid_date=None,
                    skip_panjung_obs=None,
-                   assign_prev_month_obs=True, disabled_rules=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
+                   assign_prev_month_obs=True, disabled_rules=None, h10_r2_allow=None, manual_pins=None, drop_prev_month_obs=False, panjung_ranges=None, tx_ranges=None,
                  longleave_range=None, weekly_extra_bogeonso=False, weekly_extra_rad=False):
     """
     app.py에서 호출하는 진입점.
@@ -2482,6 +2503,7 @@ def solve_schedule(df_all, residents, leaves, week_count, start_date, holidays,
         skip_panjung_obs=skip_panjung_obs,
         assign_prev_month_obs=assign_prev_month_obs,
         disabled_rules=disabled_rules,
+        h10_r2_allow=h10_r2_allow,
         manual_pins=manual_pins,
         drop_prev_month_obs=drop_prev_month_obs,
         panjung_ranges=panjung_ranges,

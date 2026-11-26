@@ -125,6 +125,16 @@ def get_date_options(base_date, week_count, extended=False):
 _CHIEF_ROLES = ("의국수석", "교육수석", "학생수석", "진료수석")
 
 
+def _h10_r2_allow():
+    """배정 탭 'R3 전용 업무 R2 허용' 체크 → 솔버에 넘길 허용 항목 리스트"""
+    out = []
+    if st.session_state.get('h10_r2_yejin'):
+        out.append('yejin')
+    if st.session_state.get('h10_r2_jbr'):
+        out.append('jbr_pms')
+    return out
+
+
 def get_sorted_residents(residents):
     def rank_score(r):
         year, roles = r['연차'], r['역할']
@@ -735,6 +745,8 @@ with st.sidebar:
         "weekly_extra_bogeonso": st.session_state.get("weekly_extra_bogeonso", False),
         "weekly_extra_rad": st.session_state.get("weekly_extra_rad", False),
         "adjust_stage3_years": st.session_state.get("adjust_stage3_years"),
+        "h10_r2_yejin": bool(st.session_state.get("h10_r2_yejin", False)),
+        "h10_r2_jbr": bool(st.session_state.get("h10_r2_jbr", False)),
         "biweekly_choice": st.session_state.get("biweekly_choice", {}),
         "disabled_rules": st.session_state.get("disabled_rules", []),
         "manual_pins": st.session_state.get("manual_pins", []),
@@ -902,6 +914,8 @@ with st.sidebar:
             st.session_state.pop("ll_lo", None); st.session_state.pop("ll_hi", None)
         st.session_state.weekly_extra_bogeonso = bool(data.get("weekly_extra_bogeonso", False))
         st.session_state.weekly_extra_rad = bool(data.get("weekly_extra_rad", False))
+        st.session_state.h10_r2_yejin = bool(data.get("h10_r2_yejin", False))
+        st.session_state.h10_r2_jbr = bool(data.get("h10_r2_jbr", False))
         if data.get("adjust_stage3_years") in ADJUST_STAGE3_YEARS:
             st.session_state.adjust_stage3_years = data["adjust_stage3_years"]
         _txr = data.get("tx_ranges")
@@ -1569,6 +1583,16 @@ with tabs[6]:
         else:
             st.success("✅ 모든 하드 룰 적용 중 (기본 상태)")
 
+    # === 🔓 R3 전용 업무를 2년차(R2)에게도 허용 ===
+    st.markdown("##### 🔓 R3 전용 업무 2년차(R2) 허용")
+    _h10c1, _h10c2 = st.columns(2)
+    _h10c1.checkbox("**예진**을 R2도 받을 수 있게", key="h10_r2_yejin",
+                    help="원래 예진은 R3만 받습니다(H10). 켜면 R2(보건소 제외)도 배정 대상이 됩니다. R1·R0는 계속 제외.")
+    _h10c2.checkbox("**조비룡·박민선 외래** 차리/참관을 R2도 받을 수 있게", key="h10_r2_jbr",
+                    help="원래 조비룡·박민선 외래 차리/참관은 R3만 받습니다(H10). 켜면 R2(보건소 제외)도 배정 대상이 됩니다. R1·R0는 계속 제외.")
+    if "H10_r3_only" in (st.session_state.get('disabled_rules') or []):
+        st.caption("ℹ️ H10 룰 자체가 해제되어 있어 지금은 R1·R0까지 모두 받을 수 있습니다 (위 체크와 무관).")
+
     # === 📌 직접 지정 배정 (부족한 날 예외 처리) ===
     with st.expander("📌 직접 지정 배정 — 부족한 날 자동 확인 + 예외 배정", expanded=False):
         st.caption(
@@ -1589,6 +1613,7 @@ with tabs[6]:
                 st.session_state.base_date, _u_hol,
                 bogeonso_substitutes=st.session_state.bogeonso_substitutes,
                 rad_days=_rad_sh, student_practices=st.session_state.student_practices,
+                h10_r2_allow=_h10_r2_allow(),
             )
         except Exception as _e:
             _short = []
@@ -2102,6 +2127,7 @@ with tabs[6]:
                         skip_panjung_obs=st.session_state.get('skip_panjung_obs') or None,
                         assign_prev_month_obs=(not bool(st.session_state.get('relax_prev_month_obs', False))),
                         disabled_rules=st.session_state.get('disabled_rules') or None,
+                        h10_r2_allow=_h10_r2_allow() or None,
                         manual_pins=_pins_to_task_ids(df_gen, st.session_state.get('manual_pins')),
                         drop_prev_month_obs=bool(st.session_state.get('drop_prev_month_obs', False)),
                         panjung_ranges=st.session_state.get('panjung_ranges') or None,
