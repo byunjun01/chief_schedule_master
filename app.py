@@ -7,6 +7,38 @@ import re
 import math
 import traceback
 from datetime import datetime, timedelta
+
+
+# === 배포 후 '옛 모듈' 방지 ===
+# Streamlit Cloud는 git push 후 app.py는 새로 실행하지만, 이미 import된 로컬 모듈(cpsat_solver 등)은
+# 메모리의 옛 버전을 그대로 쓰는 경우가 있다 → 새 app.py가 옛 함수를 호출해 TypeError가 난다.
+# 로컬 모듈 파일의 수정시각이 마지막으로 불러온 때와 다르면 import 전에 다시 불러온다.
+def _reload_changed_local_modules():
+    import sys as _sys
+    import importlib as _il
+    _base = os.path.dirname(os.path.abspath(__file__))
+    _names = ("auth", "utils", "manual", "verification", "cpsat_solver")
+    _sig = []
+    for _n in _names:
+        try:
+            _sig.append(os.path.getmtime(os.path.join(_base, f"{_n}.py")))
+        except OSError:
+            _sig.append(None)
+    _sig = tuple(_sig)
+    if getattr(_sys, "_sc_local_modules_sig", None) == _sig:
+        return
+    for _n in _names:
+        _m = _sys.modules.get(_n)
+        if _m is not None:
+            try:
+                _il.reload(_m)
+            except Exception:
+                _sys.modules.pop(_n, None)  # 재로드 실패 시 다음 import에서 새로 불러오게
+    _sys._sc_local_modules_sig = _sig
+
+
+_reload_changed_local_modules()
+
 from utils import PROF_ORDER, RAW_SCHEDULES_INITIAL, get_task_style, get_prof_raw_style, generate_schedule, run_auto_assignment, biweekly_week_active, is_prof_off
 from utils import ADJUST_STAGE1_ROW, ADJUST_STAGE_ROWS, ADJUST_STAGE3_YEARS, apply_adjust_stage, adjust_stage_skip_names, detect_adjust_stage
 from manual import show_manual # [추가] 사용법 모듈 불러오기
